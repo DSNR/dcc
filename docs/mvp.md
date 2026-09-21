@@ -1,5 +1,9 @@
 # MVP Specification — E2EE P2P Serverless Chat
 
+## language
+
+This will be built using Go and binaries compiled for windows and linux
+
 ## Goal
 
 Build a lightweight, cross-platform, end-to-end encrypted peer-to-peer chat application for:
