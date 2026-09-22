@@ -37,15 +37,19 @@ The exchange over the Rendezvous that lets peers set up a direct WebRTC connecti
 _Avoid_: Handshake (that's the Noise step), negotiation
 
 **Identity**:
-A participant's persistent local keypair, used to authenticate sessions and stabilise the Security Code across sessions.
-_Avoid_: Account, profile
+A participant's persistent local keypair, used to authenticate sessions and stabilise the Security Code across sessions. A Peer's Identity is what a Conversation pins.
+_Avoid_: Account, profile, static key
+
+**Display Name**:
+The self-chosen name a participant announces to the other side; a hint for recognising a returning Peer, never proof of who they are.
+_Avoid_: Username, handle
 
 **Security Code**:
-The short human-readable string both participants can compare to verify they're talking to each other with no one in between.
+The short human-readable string both participants can compare to verify they're talking to each other with no one in between. Derived from both Identities, so it is the same every Session between the same two people.
 _Avoid_: Fingerprint, safety number
 
 **Conversation**:
-The locally stored history of messages with a given Peer across sessions.
+The locally stored history of messages with a given Peer across sessions, identified locally and pinned to that Peer's current Identity. Survives an accepted Identity change.
 _Avoid_: Chat, thread, log
 
 **Call**:
