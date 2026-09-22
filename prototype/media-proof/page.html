@@ -1,0 +1,31 @@
+<!doctype html><meta charset=utf-8><title>dcc media proof</title>
+<body style="font-family:sans-serif;background:#111;color:#eee">
+<h3>dcc media proof — PROTOTYPE</h3>
+<p>Expect: moving test pattern (VP8 from govpx), a 440 Hz beep every 2 s (Opus from pion/opus). Your mic goes back to Go.</p>
+<video id=v autoplay playsinline style="width:640px;height:480px;background:#000"></video>
+<pre id=log></pre>
+<script>
+const log = m => document.getElementById('log').textContent += m + '\n';
+(async () => {
+  const pc = new RTCPeerConnection();
+  pc.ontrack = e => { document.getElementById('v').srcObject = e.streams[0]; log('track ' + e.track.kind); };
+  pc.onconnectionstatechange = () => log('state ' + pc.connectionState);
+  try {
+    const mic = await navigator.mediaDevices.getUserMedia({audio: true});
+    mic.getTracks().forEach(t => pc.addTrack(t, mic));
+  } catch (e) { log('no mic: ' + e); pc.addTransceiver('audio', {direction:'recvonly'}); }
+  pc.addTransceiver('video', {direction:'recvonly'});
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await new Promise(r => pc.iceGatheringState === 'complete' ? r() : pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r());
+  const res = await fetch('/offer', {method:'POST', body: JSON.stringify(pc.localDescription)});
+  await pc.setRemoteDescription(await res.json());
+  setInterval(async () => {
+    const s = await pc.getStats(); let out = '';
+    s.forEach(r => { if (r.type === 'inbound-rtp') out += `${r.kind}: pkts ${r.packetsReceived} lost ${r.packetsLost} decoded ${r.framesDecoded ?? ''} dropped ${r.framesDropped ?? ''} fps ${r.framesPerSecond ?? ''} ${r.frameWidth ?? ''}x${r.frameHeight ?? ''}\n`; });
+    document.getElementById('log').textContent = out;
+    const st = {}; s.forEach(r => { if (r.type === 'inbound-rtp') st[r.kind] = r.kind==='video' ? {pkts:r.packetsReceived, lost:r.packetsLost, framesReceived:r.framesReceived, framesDecoded:r.framesDecoded, keyFramesDecoded:r.keyFramesDecoded, framesDropped:r.framesDropped, fps:r.framesPerSecond, w:r.frameWidth, h:r.frameHeight, pli:r.pliCount, fir:r.firCount, nack:r.nackCount, decoder:r.decoderImplementation, assembled:r.framesAssembledFromMultiplePackets, powerEff:r.powerEfficientDecoder} : {pkts:r.packetsReceived, lost:r.packetsLost, samples:r.totalSamplesReceived, concealed:r.concealedSamples}; });
+    fetch('/stats', {method:'POST', body: JSON.stringify(st)});
+  }, 1000);
+})();
+</script>
