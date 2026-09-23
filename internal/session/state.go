@@ -73,6 +73,10 @@ const (
 	ReasonHandshakeFailed
 	// ReasonConnectionLost: the connection died under an established Session.
 	ReasonConnectionLost
+	// ReasonTransportFailed: the WebRTC transport never came up — the offer
+	// or ICE timed out, or the DTLS certificate wasn't the one the handshake
+	// bound.
+	ReasonTransportFailed
 )
 
 // String implements fmt.Stringer.
@@ -88,6 +92,8 @@ func (r Reason) String() string {
 		return "handshake failed"
 	case ReasonConnectionLost:
 		return "connection lost"
+	case ReasonTransportFailed:
+		return "transport failed"
 	}
 	return fmt.Sprintf("Reason(%d)", int(r))
 }

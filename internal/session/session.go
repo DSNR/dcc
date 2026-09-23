@@ -13,6 +13,7 @@ import (
 	"github.com/DSNR/dcc/internal/identity"
 	"github.com/DSNR/dcc/internal/rendezvous"
 	"github.com/DSNR/dcc/internal/signaling"
+	"github.com/DSNR/dcc/internal/transport"
 	"github.com/DSNR/dcc/internal/wire"
 )
 
@@ -20,15 +21,17 @@ import (
 // owns — chiefly waiting for cloudflared to die.
 const teardownWait = 10 * time.Second
 
+// maxHeld bounds the DataChannel frames held back while this side's Security
+// Code prompt stands. A Peer that keeps talking past that into an unresolved
+// prompt loses the excess; its acks never come, which is answer enough.
+const maxHeld = 256
+
 // Options configures a Session.
 type Options struct {
 	// Identity is this install's persistent keypair.
 	Identity identity.Identity
 	// Name is the Display Name announced to the other side.
 	Name string
-	// DTLS is this side's certificate fingerprint, bound into the handshake.
-	// It is injected until the WebRTC work mints certificates itself.
-	DTLS string
 	// Tunnel publishes the Rendezvous when Hosting. Nil means a real
 	// cloudflared Quick Tunnel; tests pass rendezvous.Loopback.
 	Tunnel rendezvous.Tunnel
@@ -43,7 +46,7 @@ type Options struct {
 type Session struct {
 	identity identity.Identity
 	name     string
-	dtls     string
+	cert     transport.Certificate
 	tunnel   rendezvous.Tunnel
 	pins     Pins
 	events   *eventQueue
@@ -55,15 +58,26 @@ type Session struct {
 	rdv      *rendezvous.Rendezvous
 	signal   *signaling.Server
 	conn     *signaling.Conn
+	trans    *transport.Transport
 	peer     identity.PublicKey
 	peerName string
 	locked   bool
+	accepted bool
+	up       bool
+	link     transport.Link
+	held     []wire.Frame
+	unacked  []string
 }
 
-// New builds an Idle Session. The name and fingerprint are checked here, so
-// a Session that would fail every handshake is refused before it starts.
+// New builds an Idle Session, minting the DTLS certificate its handshake
+// will bind. The name is checked here too, so a Session that would fail
+// every handshake is refused before it starts.
 func New(opts Options) (*Session, error) {
-	if _, err := wire.EncodePeerHello(wire.PeerHello{Name: opts.Name, DTLS: opts.DTLS}); err != nil {
+	cert, err := transport.NewCertificate()
+	if err != nil {
+		return nil, fmt.Errorf("session: %w", err)
+	}
+	if _, err := wire.EncodePeerHello(wire.PeerHello{Name: opts.Name, DTLS: cert.Fingerprint()}); err != nil {
 		return nil, fmt.Errorf("session: %w", err)
 	}
 	pins := opts.Pins
@@ -73,7 +87,7 @@ func New(opts Options) (*Session, error) {
 	return &Session{
 		identity: opts.Identity,
 		name:     opts.Name,
-		dtls:     opts.DTLS,
+		cert:     cert,
 		tunnel:   opts.Tunnel,
 		pins:     pins,
 		events:   newEventQueue(),
@@ -119,7 +133,7 @@ func (s *Session) Host(ctx context.Context) error {
 		return err
 	}
 
-	hello := wire.HostHello{SessionID: sessionID.String(), Name: s.name, DTLS: s.dtls}
+	hello := wire.HostHello{SessionID: sessionID.String(), Name: s.name, DTLS: s.cert.Fingerprint()}
 
 	s.mu.Lock()
 	if s.closed {
@@ -161,7 +175,8 @@ func (s *Session) Join(ctx context.Context, invite string) error {
 
 // Accept resolves the standing Security Code prompt in the other person's
 // favour: their Identity is pinned under the name they announced, and the
-// Session moves on to Connected.
+// Session moves on to Connected as soon as the transport underneath is up —
+// usually already, since ICE ran while the prompt stood.
 func (s *Session) Accept() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -169,8 +184,39 @@ func (s *Session) Accept() error {
 		return fmt.Errorf("session: no Security Code prompt to accept while %s", s.state)
 	}
 	s.pins.Pin(s.peerName, s.peer)
-	s.setStateLocked(Connected, ReasonNone)
+	s.accepted = true
+	s.maybeConnectLocked()
 	return nil
+}
+
+// SendText sends one chat message to the Peer and returns its id — a UUIDv7,
+// minted here, that carries the send time. The message's life after that
+// arrives as TextStatus events: pending and sent at once, delivered when the
+// Peer acknowledges it.
+func (s *Session) SendText(body string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.state != Connected {
+		return "", fmt.Errorf("session: cannot send text while %s", s.state)
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return "", fmt.Errorf("session: minting a message id: %w", err)
+	}
+	f := wire.Text{ID: id.String(), Body: body}
+	// A body the wire would refuse is reported here, synchronously, before
+	// any TextStatus event exists to clean up after.
+	if _, err := wire.Encode(f); err != nil {
+		return "", err
+	}
+	s.events.emit(TextStatus{ID: f.ID, Status: TextPending})
+	if err := s.trans.Send(f); err != nil {
+		s.events.emit(TextStatus{ID: f.ID, Status: TextFailed})
+		return "", err
+	}
+	s.unacked = append(s.unacked, f.ID)
+	s.events.emit(TextStatus{ID: f.ID, Status: TextSent})
+	return f.ID, nil
 }
 
 // Refuse resolves the standing Security Code prompt against the other
@@ -224,7 +270,7 @@ func (s *Session) dial(ctx context.Context, invite rendezvous.Invite) {
 	conn, hostHello, err := signaling.Dial(ctx, invite.SignalURL(), signaling.DialOptions{
 		Identity: s.identity,
 		Password: invite.Password,
-		Hello:    wire.PeerHello{Name: s.name, DTLS: s.dtls},
+		Hello:    wire.PeerHello{Name: s.name, DTLS: s.cert.Fingerprint()},
 	})
 
 	s.mu.Lock()
@@ -242,7 +288,7 @@ func (s *Session) dial(ctx context.Context, invite rendezvous.Invite) {
 		s.endLocked(Failed, ReasonHandshakeFailed)
 		return
 	}
-	s.attachLocked(conn, hostHello.Name)
+	s.attachLocked(conn, hostHello.Name, hostHello.DTLS, true)
 }
 
 // onPeer receives every connection that authenticates at the Rendezvous.
@@ -264,7 +310,7 @@ func (s *Session) onPeer(conn *signaling.Conn, hello wire.PeerHello) {
 		return
 	}
 	s.locked = true
-	s.attachLocked(conn, hello.Name)
+	s.attachLocked(conn, hello.Name, hello.DTLS, false)
 	s.mu.Unlock()
 }
 
@@ -277,13 +323,37 @@ func rejectPeer(conn *signaling.Conn) {
 	conn.Close()
 }
 
-// attachLocked adopts an authenticated connection and raises the Security
-// Code prompt. The Session holds in Verifying until Accept or Refuse.
-func (s *Session) attachLocked(conn *signaling.Conn, name string) {
+// attachLocked adopts an authenticated connection, starts the WebRTC
+// transport underneath it and raises the Security Code prompt. The Session
+// holds in Verifying until Accept or Refuse — but Signaling and ICE run
+// meanwhile, so an accepted prompt lands on a transport that is already up.
+func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiator bool) {
 	peer := conn.Peer()
 	s.conn = conn
 	s.peer = peer
 	s.peerName = name
+
+	// The Signal callback deliberately reaches past the Session's own lock:
+	// the initiator's Start sends the offer before returning, while this
+	// method still holds it.
+	trans, err := transport.Start(transport.Options{
+		Certificate: s.cert,
+		Remote:      dtls,
+		Initiator:   initiator,
+		Signal: func(f wire.Frame) {
+			ctx, cancel := context.WithTimeout(context.Background(), teardownWait)
+			defer cancel()
+			_ = conn.Send(ctx, f)
+		},
+		Up:    s.onTransportUp,
+		Frame: s.onData,
+		Down:  s.onTransportDown,
+	})
+	if err != nil {
+		s.endLocked(Failed, ReasonTransportFailed)
+		return
+	}
+	s.trans = trans
 
 	pinned, known := s.pins.Pinned(name)
 	s.setStateLocked(Verifying, ReasonNone)
@@ -296,8 +366,8 @@ func (s *Session) attachLocked(conn *signaling.Conn, name string) {
 	go s.readLoop(conn)
 }
 
-// readLoop watches an adopted connection. Until the Signaling work lands,
-// its jobs are noticing the encrypted rejection and noticing death.
+// readLoop watches an adopted connection: it feeds Signaling frames to the
+// transport, notices the encrypted rejection, and notices death.
 func (s *Session) readLoop(conn *signaling.Conn) {
 	for {
 		f, err := conn.Recv(context.Background())
@@ -317,9 +387,98 @@ func (s *Session) readLoop(conn *signaling.Conn) {
 			s.mu.Unlock()
 			return
 		}
-		// offer, answer and ice arrive with the WebRTC work; until then any
-		// other frame is noise to survive, not state to act on.
+		trans := s.trans
 		s.mu.Unlock()
+
+		// Outside the lock: applying an offer makes the transport signal the
+		// answer straight back through the Session.
+		switch f.(type) {
+		case wire.Offer, wire.Answer, wire.ICE:
+			trans.HandleSignal(f)
+		}
+	}
+}
+
+// onTransportUp is the WebRTC transport reporting its DataChannel open, with
+// the remote certificate verified against the handshake.
+func (s *Session) onTransportUp(link transport.Link) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.up = true
+	s.link = link
+	s.maybeConnectLocked()
+}
+
+// onTransportDown is the transport dying, before or after it came up. Under
+// a Connected Session that is a lost connection; before that, the Session
+// never got going at all.
+func (s *Session) onTransportDown(error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	if s.state == Connected {
+		s.endLocked(Disconnected, ReasonConnectionLost)
+		return
+	}
+	s.endLocked(Failed, ReasonTransportFailed)
+}
+
+// maybeConnectLocked moves Verifying to Connected once both of its gates —
+// the accepted prompt and the transport being up — are open, then releases
+// whatever the Peer said in the meantime.
+func (s *Session) maybeConnectLocked() {
+	if s.state != Verifying || !s.accepted || !s.up {
+		return
+	}
+	s.setStateLocked(Connected, ReasonNone)
+	s.events.emit(LinkChanged{Link: s.link})
+	held := s.held
+	s.held = nil
+	for _, f := range held {
+		s.handleDataLocked(f)
+	}
+}
+
+// onData receives every DataChannel frame. While this side's Security Code
+// prompt stands, frames are held — nothing the Peer says is shown or
+// acknowledged until the person here has accepted who they're talking to.
+func (s *Session) onData(f wire.Frame) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	if s.state != Connected {
+		if len(s.held) < maxHeld {
+			s.held = append(s.held, f)
+		}
+		return
+	}
+	s.handleDataLocked(f)
+}
+
+// handleDataLocked acts on one DataChannel frame from the Peer. Frames whose
+// work hasn't landed yet — bye, the Call family — are survived, not acted on.
+func (s *Session) handleDataLocked(f wire.Frame) {
+	switch f := f.(type) {
+	case wire.Text:
+		s.events.emit(TextReceived{ID: f.ID, Body: f.Body, At: time.Now()})
+		// The ack is application-level delivery: it says dcc took the
+		// message, not merely that SCTP moved the bytes.
+		_ = s.trans.Send(wire.Ack{ID: f.ID})
+	case wire.Ack:
+		for i, id := range s.unacked {
+			if id == f.ID {
+				s.unacked = append(s.unacked[:i], s.unacked[i+1:]...)
+				s.events.emit(TextStatus{ID: f.ID, Status: TextDelivered})
+				return
+			}
+		}
 	}
 }
 
@@ -336,12 +495,21 @@ func (s *Session) endLocked(state State, reason Reason) {
 }
 
 // teardownLocked releases everything the Session holds and closes the event
-// stream. The slow parts — cloudflared dying — run off the caller's back.
+// stream. Messages still waiting on an ack are declared failed first — the
+// Session ending is the answer they were waiting for. The slow parts —
+// cloudflared dying — run off the caller's back.
 func (s *Session) teardownLocked() {
 	s.closed = true
-	conn, rdv := s.conn, s.rdv
-	s.conn, s.rdv, s.signal = nil, nil, nil
+	for _, id := range s.unacked {
+		s.events.emit(TextStatus{ID: id, Status: TextFailed})
+	}
+	s.unacked = nil
+	conn, rdv, trans := s.conn, s.rdv, s.trans
+	s.conn, s.rdv, s.signal, s.trans = nil, nil, nil, nil
 	go func() {
+		if trans != nil {
+			_ = trans.Close()
+		}
 		if conn != nil {
 			conn.Close()
 		}

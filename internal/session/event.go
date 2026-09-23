@@ -1,10 +1,13 @@
 package session
 
 import (
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/DSNR/dcc/internal/identity"
 	"github.com/DSNR/dcc/internal/rendezvous"
+	"github.com/DSNR/dcc/internal/transport"
 )
 
 // Event is what a Session tells its UI. The concrete types are the structs
@@ -49,6 +52,66 @@ type VerifyPrompt struct {
 }
 
 func (VerifyPrompt) event() {}
+
+// LinkChanged carries Connected's sub-status: whether content is flowing
+// peer to peer or through a relay. It follows the transition to Connected,
+// and would arrive again if the route changed under a live Session.
+type LinkChanged struct {
+	Link transport.Link
+}
+
+func (LinkChanged) event() {}
+
+// TextReceived is one chat message from the Peer. At is when it arrived
+// here; the send time travels inside the UUIDv7 ID.
+type TextReceived struct {
+	ID   string
+	Body string
+	At   time.Time
+}
+
+func (TextReceived) event() {}
+
+// TextStatus moves one sent message through its life: TextPending when
+// SendText queues it, TextSent once the DataChannel has it, TextDelivered
+// when the Peer's ack arrives — or TextFailed, from anywhere, if the Session
+// ends first.
+type TextStatus struct {
+	ID     string
+	Status DeliveryStatus
+}
+
+func (TextStatus) event() {}
+
+// DeliveryStatus is where one sent message stands.
+type DeliveryStatus int
+
+const (
+	// TextPending: accepted by SendText, not yet handed to the transport.
+	TextPending DeliveryStatus = iota + 1
+	// TextSent: on its way, ordered and reliable, but not yet acknowledged.
+	TextSent
+	// TextDelivered: the Peer's application acknowledged it.
+	TextDelivered
+	// TextFailed: the Session ended, or the transport refused it, before
+	// the acknowledgement came. Terminal.
+	TextFailed
+)
+
+// String implements fmt.Stringer.
+func (d DeliveryStatus) String() string {
+	switch d {
+	case TextPending:
+		return "pending"
+	case TextSent:
+		return "sent"
+	case TextDelivered:
+		return "delivered"
+	case TextFailed:
+		return "failed"
+	}
+	return fmt.Sprintf("DeliveryStatus(%d)", int(d))
+}
 
 // eventQueue delivers events to the UI without ever making the Session wait
 // on it: emit appends and returns, and a pump goroutine feeds the channel as
