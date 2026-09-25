@@ -347,8 +347,10 @@ func TestVerifyGateHoldsUntilResolved(t *testing.T) {
 		t.Errorf("host Disconnected for %v, want %v", sc.Reason, session.ReasonRefused)
 	}
 	waitClosed(t, host)
-	if sc := waitState(t, peer, session.Disconnected); sc.Reason != session.ReasonConnectionLost {
-		t.Errorf("peer Disconnected for %v, want %v", sc.Reason, session.ReasonConnectionLost)
+	// The refused side is told nothing — it sees its connection die, tries
+	// to reconnect, and finds nothing where the Rendezvous was.
+	if sc := waitState(t, peer, session.Failed); sc.Reason != session.ReasonRendezvousGone {
+		t.Errorf("peer Failed for %v, want %v", sc.Reason, session.ReasonRendezvousGone)
 	}
 	waitClosed(t, peer)
 }

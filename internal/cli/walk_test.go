@@ -53,7 +53,9 @@ func TestTwoTerminalsChat(t *testing.T) {
 
 	host.submit("/disconnect")
 	host.mustSee("Disconnected")
-	peer.mustSee("The connection was lost")
+	// The Peer isn't told the Host left: it sees the connection die, tries
+	// to reconnect, and finds the Rendezvous gone.
+	peer.mustSee("the Rendezvous is gone")
 }
 
 // terminal is one dcc-cli, wired to real Sessions over a loopback Rendezvous:

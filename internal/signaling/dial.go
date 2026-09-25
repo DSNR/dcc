@@ -2,7 +2,11 @@ package signaling
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"syscall"
 
 	"github.com/coder/websocket"
 
@@ -10,6 +14,13 @@ import (
 	"github.com/DSNR/dcc/internal/rendezvous"
 	"github.com/DSNR/dcc/internal/wire"
 )
+
+// ErrRendezvousGone marks a dial that failed because nothing is answering
+// where the Rendezvous used to be — the connection was refused, the hostname
+// no longer resolves, or something that is not a Rendezvous answered. A
+// reconnecting Peer stops retrying on this: no amount of patience brings a
+// dead Quick Tunnel back.
+var ErrRendezvousGone = errors.New("signaling: the Rendezvous is gone")
 
 // DialOptions is what the Peer brings to a handshake.
 type DialOptions struct {
@@ -34,8 +45,11 @@ func Dial(ctx context.Context, url string, opts DialOptions) (*Conn, wire.HostHe
 	ctx, cancel := context.WithTimeout(ctx, HandshakeTimeout)
 	defer cancel()
 
-	ws, _, err := websocket.Dial(ctx, url, nil)
+	ws, resp, err := websocket.Dial(ctx, url, nil)
 	if err != nil {
+		if rendezvousGone(resp, err) {
+			return nil, wire.HostHello{}, fmt.Errorf("dialing %s: %w: %w", url, ErrRendezvousGone, err)
+		}
 		return nil, wire.HostHello{}, fmt.Errorf("signaling: dialing %s: %w", url, err)
 	}
 	ws.SetReadLimit(readLimit)
@@ -46,6 +60,23 @@ func Dial(ctx context.Context, url string, opts DialOptions) (*Conn, wire.HostHe
 		return nil, wire.HostHello{}, err
 	}
 	return conn, hello, nil
+}
+
+// rendezvousGone distinguishes a Rendezvous that is provably not there —
+// the dial was answered, just not with a WebSocket upgrade, or refused
+// outright — from a path that is merely dark, which a reconnecting Peer
+// should keep trying through.
+func rendezvousGone(resp *http.Response, err error) bool {
+	if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols {
+		// Something answered, and it was not a Rendezvous. A dead Quick
+		// Tunnel looks like this: Cloudflare's edge serves an error page.
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	var dns *net.DNSError
+	return errors.As(err, &dns) && dns.IsNotFound
 }
 
 // initiate runs the initiator's side of the handshake over an open WebSocket.

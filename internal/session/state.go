@@ -22,8 +22,9 @@ const (
 	// Connected: both this side's prompt is resolved and the connection is
 	// live.
 	Connected
-	// Reconnecting: the connection dropped and is being re-established.
-	// Unreachable until the reconnect work lands.
+	// Reconnecting: the connection dropped and is being re-established
+	// within the ReconnectBudget — the Peer redialing, the Host waiting at
+	// its Rendezvous. Messages written here are queued and resent.
 	Reconnecting
 	// Disconnected: the Session ended — deliberately, or because the
 	// connection was lost. Terminal.
@@ -77,6 +78,10 @@ const (
 	// or ICE timed out, or the DTLS certificate wasn't the one the handshake
 	// bound.
 	ReasonTransportFailed
+	// ReasonRendezvousGone: a reconnect found nothing where the Rendezvous
+	// used to be. The Session is unrecoverable — a fresh Invite is the only
+	// way forward.
+	ReasonRendezvousGone
 )
 
 // String implements fmt.Stringer.
@@ -94,6 +99,8 @@ func (r Reason) String() string {
 		return "connection lost"
 	case ReasonTransportFailed:
 		return "transport failed"
+	case ReasonRendezvousGone:
+		return "rendezvous gone"
 	}
 	return fmt.Sprintf("Reason(%d)", int(r))
 }

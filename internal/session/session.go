@@ -41,6 +41,9 @@ type Options struct {
 	// History persists the Conversation as messages flow. Nil keeps
 	// nothing.
 	History History
+	// ReconnectWait overrides ReconnectBudget; zero means the protocol
+	// value. Tests shorten it.
+	ReconnectWait time.Duration
 }
 
 // Session is one Session from Invite to disconnect, driven entirely through
@@ -54,6 +57,7 @@ type Session struct {
 	pins     Pins
 	history  History
 	events   *eventQueue
+	budget   time.Duration
 
 	mu       sync.Mutex
 	state    State
@@ -70,7 +74,39 @@ type Session struct {
 	up       bool
 	link     transport.Link
 	held     []wire.Frame
-	unacked  []string
+
+	// sessionID is the id the Host minted — held by both sides, echoed by
+	// the Peer's re-handshake to claim it is resuming this Session and not
+	// starting another.
+	sessionID string
+	// isHost picks the reconnect posture: a Host waits at its Rendezvous
+	// while a Peer redials it.
+	isHost bool
+	// invite is what the Peer joined with, kept for redials.
+	invite rendezvous.Invite
+	// gen counts connection attachments. Callbacks from a connection or
+	// transport that has since been replaced carry a stale gen and are
+	// ignored.
+	gen int
+	// queue holds every sent message the Peer hasn't acknowledged, in send
+	// order, so a reconnect can put them back on the wire.
+	queue []outText
+	// seen remembers which incoming message ids were already taken this
+	// Session, so a resend after a reconnect is re-acknowledged but never
+	// shown twice.
+	seen map[string]bool
+	// redialing notes the Peer's redial loop is running; reconnectTimer is
+	// the Host's budget running out.
+	redialing      bool
+	reconnectUntil time.Time
+	reconnectTimer *time.Timer
+}
+
+// outText is one message the other side hasn't acknowledged: sent and
+// waiting, or written during Reconnecting and waiting to be sent at all.
+type outText struct {
+	id, body string
+	sent     bool
 }
 
 // New builds an Idle Session, minting the DTLS certificate its handshake
@@ -88,6 +124,10 @@ func New(opts Options) (*Session, error) {
 	if pins == nil {
 		pins = NewMemoryPins()
 	}
+	budget := opts.ReconnectWait
+	if budget == 0 {
+		budget = ReconnectBudget
+	}
 	return &Session{
 		identity: opts.Identity,
 		name:     opts.Name,
@@ -96,7 +136,9 @@ func New(opts Options) (*Session, error) {
 		pins:     pins,
 		history:  opts.History,
 		events:   newEventQueue(),
+		budget:   budget,
 		state:    Idle,
+		seen:     make(map[string]bool),
 	}, nil
 }
 
@@ -151,6 +193,8 @@ func (s *Session) Host(ctx context.Context) error {
 	}
 	s.rdv = rdv
 	s.signal = signaling.NewServer(s.identity, rdv.Invite().Password, hello, s.onPeer)
+	s.sessionID = hello.SessionID
+	s.isHost = true
 	s.starting = false
 	s.setStateLocked(Hosting, ReasonNone)
 	s.events.emit(InviteReady{Invite: rdv.Invite()})
@@ -171,6 +215,7 @@ func (s *Session) Join(ctx context.Context, invite string) error {
 	}
 
 	s.mu.Lock()
+	s.invite = parsed
 	s.setStateLocked(Connecting, ReasonNone)
 	s.mu.Unlock()
 
@@ -201,11 +246,13 @@ func (s *Session) Accept() error {
 // SendText sends one chat message to the Peer and returns its id — a UUIDv7,
 // minted here, that carries the send time. The message's life after that
 // arrives as TextStatus events: pending and sent at once, delivered when the
-// Peer acknowledges it.
+// Peer acknowledges it. A message written while Reconnecting is queued and
+// goes out — with everything else still unacknowledged — the moment the
+// connection is back.
 func (s *Session) SendText(body string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.state != Connected {
+	if s.closed || (s.state != Connected && s.state != Reconnecting) {
 		return "", fmt.Errorf("session: cannot send text while %s", s.state)
 	}
 	id, err := uuid.NewV7()
@@ -226,12 +273,16 @@ func (s *Session) SendText(body string) (string, error) {
 		}
 	}
 	s.events.emit(TextStatus{ID: f.ID, Status: TextPending})
-	if err := s.trans.Send(f); err != nil {
-		s.status(f.ID, TextFailed)
-		return "", err
+	msg := outText{id: f.ID, body: body}
+	if s.state == Connected {
+		// A refused Send means the transport is dying under us: the message
+		// stays queued and the reconnect that follows resends it.
+		msg.sent = s.trans.Send(f) == nil
 	}
-	s.unacked = append(s.unacked, f.ID)
-	s.status(f.ID, TextSent)
+	s.queue = append(s.queue, msg)
+	if msg.sent {
+		s.status(f.ID, TextSent)
+	}
 	return f.ID, nil
 }
 
@@ -304,30 +355,41 @@ func (s *Session) dial(ctx context.Context, invite rendezvous.Invite) {
 		s.endLocked(Failed, ReasonHandshakeFailed)
 		return
 	}
-	s.attachLocked(conn, hostHello.Name, hostHello.DTLS, true)
+	s.sessionID = hostHello.SessionID
+	s.attachLocked(conn, hostHello.Name, hostHello.DTLS, true, false)
 }
 
 // onPeer receives every connection that authenticates at the Rendezvous.
 // The first Identity through locks the Invite; a different Identity after
-// that is told, under the transport keys, that the Invite is taken.
+// that is told, under the transport keys, that the Invite is taken. The
+// locked Identity handshaking again — echoing the session_id after a blip,
+// or afresh after a crash — replaces the stale connection and the Session
+// carries on: it was already accepted, so no new prompt stands in the way.
 func (s *Session) onPeer(conn *signaling.Conn, hello wire.PeerHello) {
 	s.mu.Lock()
-	if s.closed || s.state != Hosting {
-		if s.locked && s.peer != conn.Peer() && !s.closed {
-			s.mu.Unlock()
-			go rejectPeer(conn)
-			return
-		}
-		// The locked Identity dialing again is a reconnect, which lands
-		// with the Reconnecting work; until then the fresh connection is
-		// simply declined.
+	switch {
+	case s.closed:
 		s.mu.Unlock()
 		conn.Close()
-		return
+	case s.state == Hosting && hello.SessionID == "":
+		s.locked = true
+		s.attachLocked(conn, hello.Name, hello.DTLS, false, false)
+		s.mu.Unlock()
+	case (s.state == Connected || s.state == Reconnecting) &&
+		conn.Peer() == s.peer &&
+		(hello.SessionID == "" || hello.SessionID == s.sessionID):
+		s.enterReconnectLocked()
+		s.attachLocked(conn, hello.Name, hello.DTLS, false, true)
+		s.mu.Unlock()
+	case s.locked && conn.Peer() != s.peer:
+		s.mu.Unlock()
+		go rejectPeer(conn)
+	default:
+		// A claim to be resuming some other Session, or the locked
+		// Identity turning up in a state with nothing to resume.
+		s.mu.Unlock()
+		conn.Close()
 	}
-	s.locked = true
-	s.attachLocked(conn, hello.Name, hello.DTLS, false)
-	s.mu.Unlock()
 }
 
 // rejectPeer tells a locked-out Identity the one thing it is owed —
@@ -340,14 +402,20 @@ func rejectPeer(conn *signaling.Conn) {
 }
 
 // attachLocked adopts an authenticated connection, starts the WebRTC
-// transport underneath it and raises the Security Code prompt. The Session
-// holds in Verifying until Accept or Refuse — but Signaling and ICE run
-// meanwhile, so an accepted prompt lands on a transport that is already up.
-func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiator bool) {
+// transport underneath it and — on a first attachment — raises the Security
+// Code prompt. The Session holds in Verifying until Accept or Refuse, but
+// Signaling and ICE run meanwhile, so an accepted prompt lands on a
+// transport that is already up. A reconnect attachment raises no prompt:
+// the Identity was verified when the Session began, and the Session stays
+// Reconnecting until the new transport comes up.
+func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiator, reconnect bool) {
 	peer := conn.Peer()
 	s.conn = conn
 	s.peer = peer
 	s.peerName = name
+	s.up = false
+	s.gen++
+	gen := s.gen
 
 	// The Signal callback deliberately reaches past the Session's own lock:
 	// the initiator's Start sends the offer before returning, while this
@@ -361,9 +429,9 @@ func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiato
 			defer cancel()
 			_ = conn.Send(ctx, f)
 		},
-		Up:    s.onTransportUp,
-		Frame: s.onData,
-		Down:  s.onTransportDown,
+		Up:    func(link transport.Link) { s.onTransportUp(gen, link) },
+		Frame: func(f wire.Frame) { s.onData(gen, f) },
+		Down:  func(err error) { s.onTransportDown(gen, err) },
 	})
 	if err != nil {
 		s.endLocked(Failed, ReasonTransportFailed)
@@ -371,14 +439,16 @@ func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiato
 	}
 	s.trans = trans
 
-	pinned, known := s.pins.Pinned(name)
-	s.setStateLocked(Verifying, ReasonNone)
-	s.events.emit(VerifyPrompt{
-		Code:    s.identity.SecurityCode(peer),
-		Name:    name,
-		Peer:    peer,
-		Changed: known && pinned != peer,
-	})
+	if !reconnect {
+		pinned, known := s.pins.Pinned(name)
+		s.setStateLocked(Verifying, ReasonNone)
+		s.events.emit(VerifyPrompt{
+			Code:    s.identity.SecurityCode(peer),
+			Name:    name,
+			Peer:    peer,
+			Changed: known && pinned != peer,
+		})
+	}
 	go s.readLoop(conn)
 }
 
@@ -394,7 +464,7 @@ func (s *Session) readLoop(conn *signaling.Conn) {
 			return
 		}
 		if err != nil {
-			s.endLocked(Disconnected, ReasonConnectionLost)
+			s.connectionLostLocked()
 			s.mu.Unlock()
 			return
 		}
@@ -417,10 +487,10 @@ func (s *Session) readLoop(conn *signaling.Conn) {
 
 // onTransportUp is the WebRTC transport reporting its DataChannel open, with
 // the remote certificate verified against the handshake.
-func (s *Session) onTransportUp(link transport.Link) {
+func (s *Session) onTransportUp(gen int, link transport.Link) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || gen != s.gen {
 		return
 	}
 	s.up = true
@@ -429,30 +499,39 @@ func (s *Session) onTransportUp(link transport.Link) {
 }
 
 // onTransportDown is the transport dying, before or after it came up. Under
-// a Connected Session that is a lost connection; before that, the Session
-// never got going at all.
-func (s *Session) onTransportDown(error) {
+// an established Session the reconnect machinery takes over; before that,
+// the Session never got going at all.
+func (s *Session) onTransportDown(gen int, _ error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || gen != s.gen {
 		return
 	}
-	if s.state == Connected {
-		s.endLocked(Disconnected, ReasonConnectionLost)
+	if s.state == Connected || s.state == Reconnecting {
+		s.enterReconnectLocked()
 		return
 	}
 	s.endLocked(Failed, ReasonTransportFailed)
 }
 
-// maybeConnectLocked moves Verifying to Connected once both of its gates —
-// the accepted prompt and the transport being up — are open, then releases
-// whatever the Peer said in the meantime.
+// maybeConnectLocked moves Verifying or Reconnecting to Connected once both
+// of its gates — the accepted prompt and the transport being up — are open,
+// resends what the Peer never acknowledged, then releases whatever the Peer
+// said in the meantime.
 func (s *Session) maybeConnectLocked() {
-	if s.state != Verifying || !s.accepted || !s.up {
+	if s.state != Verifying && s.state != Reconnecting {
 		return
+	}
+	if !s.accepted || !s.up {
+		return
+	}
+	if s.reconnectTimer != nil {
+		s.reconnectTimer.Stop()
+		s.reconnectTimer = nil
 	}
 	s.setStateLocked(Connected, ReasonNone)
 	s.events.emit(LinkChanged{Link: s.link})
+	s.resendLocked()
 	held := s.held
 	s.held = nil
 	for _, f := range held {
@@ -463,10 +542,10 @@ func (s *Session) maybeConnectLocked() {
 // onData receives every DataChannel frame. While this side's Security Code
 // prompt stands, frames are held — nothing the Peer says is shown or
 // acknowledged until the person here has accepted who they're talking to.
-func (s *Session) onData(f wire.Frame) {
+func (s *Session) onData(gen int, f wire.Frame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || gen != s.gen {
 		return
 	}
 	if s.state != Connected {
@@ -483,6 +562,12 @@ func (s *Session) onData(f wire.Frame) {
 func (s *Session) handleDataLocked(f wire.Frame) {
 	switch f := f.(type) {
 	case wire.Text:
+		if s.seen[f.ID] {
+			// A resend of something already shown — the blip ate the ack,
+			// not the message. Acknowledged again, shown once.
+			_ = s.trans.Send(wire.Ack{ID: f.ID})
+			return
+		}
 		at := time.Now()
 		// Persist-before-ack: the ack promises the message is kept, so a
 		// message that could not be kept gets no ack and is not shown — to
@@ -495,18 +580,20 @@ func (s *Session) handleDataLocked(f wire.Frame) {
 			if !fresh {
 				// A resend of something already kept: acknowledged again,
 				// shown once.
+				s.seen[f.ID] = true
 				_ = s.trans.Send(wire.Ack{ID: f.ID})
 				return
 			}
 		}
+		s.seen[f.ID] = true
 		s.events.emit(TextReceived{ID: f.ID, Body: f.Body, At: at})
 		// The ack is application-level delivery: it says dcc took the
 		// message, not merely that SCTP moved the bytes.
 		_ = s.trans.Send(wire.Ack{ID: f.ID})
 	case wire.Ack:
-		for i, id := range s.unacked {
-			if id == f.ID {
-				s.unacked = append(s.unacked[:i], s.unacked[i+1:]...)
+		for i := range s.queue {
+			if s.queue[i].id == f.ID {
+				s.queue = append(s.queue[:i], s.queue[i+1:]...)
 				s.status(f.ID, TextDelivered)
 				return
 			}
@@ -543,10 +630,15 @@ func (s *Session) endLocked(state State, reason Reason) {
 // cloudflared dying — run off the caller's back.
 func (s *Session) teardownLocked() {
 	s.closed = true
-	for _, id := range s.unacked {
-		s.status(id, TextFailed)
+	s.gen++
+	if s.reconnectTimer != nil {
+		s.reconnectTimer.Stop()
+		s.reconnectTimer = nil
 	}
-	s.unacked = nil
+	for _, m := range s.queue {
+		s.status(m.id, TextFailed)
+	}
+	s.queue = nil
 	conn, rdv, trans := s.conn, s.rdv, s.trans
 	s.conn, s.rdv, s.signal, s.trans = nil, nil, nil, nil
 	go func() {

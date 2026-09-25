@@ -49,6 +49,8 @@ func stateNotice(e session.StateChanged) string {
 		return "The connection was lost."
 	case session.ReasonTransportFailed:
 		return "Could not reach the other person: no connection could be established."
+	case session.ReasonRendezvousGone:
+		return "Could not reconnect: the Rendezvous is gone. Ask for a fresh Invite and start again."
 	}
 	switch e.State {
 	case session.Hosting:
