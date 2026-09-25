@@ -10,8 +10,12 @@ import (
 )
 
 // stamp is how a time is shown against every line. Seconds are noise in a
-// conversation, and the date belongs to the history view that #24 brings.
+// conversation; dates appear as their own lines where history spans days.
 const stamp = "15:04"
+
+// dateStamp is how a day is named where one has to be — over restored
+// history, and against a stored Conversation's last message.
+const dateStamp = "2 Jan 2006"
 
 // me is how this side is labelled in the conversation. The Display Name is on
 // the status line; in a conversation between two people, "you" reads better

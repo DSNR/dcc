@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strings"
 
 	"github.com/DSNR/dcc/internal/cli"
 	"github.com/DSNR/dcc/internal/identity"
 	"github.com/DSNR/dcc/internal/rendezvous"
 	"github.com/DSNR/dcc/internal/session"
+	"github.com/DSNR/dcc/internal/storage"
 	"github.com/DSNR/dcc/internal/wire"
 )
 
@@ -56,6 +58,12 @@ func run() error {
 		warnings = append(warnings, reset.Warning())
 	}
 
+	store, err := storage.Open(filepath.Join(appDir, storage.FileName), id.DBKey())
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
 	// Nil means a real cloudflared Quick Tunnel.
 	var tunnel rendezvous.Tunnel
 	if *local {
@@ -65,10 +73,19 @@ func run() error {
 	return cli.Run(cli.Options{
 		Name:     *name,
 		Warnings: warnings,
+		Store:    store,
 		New: func() (cli.Session, error) {
 			// One Session per Invite: the TUI asks for a fresh one each time
-			// it hosts or connects.
-			s, err := session.New(session.Options{Identity: id, Name: *name, Tunnel: tunnel})
+			// it hosts or connects. Every Session pins and keeps history
+			// through the one Store, which is what makes a Conversation
+			// outlive them.
+			s, err := session.New(session.Options{
+				Identity: id,
+				Name:     *name,
+				Tunnel:   tunnel,
+				Pins:     store,
+				History:  store,
+			})
 			if err != nil {
 				return nil, err
 			}

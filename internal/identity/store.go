@@ -12,7 +12,8 @@ import (
 )
 
 // FileName is the file within the application directory that holds the
-// Identity. Backing dcc up is copying it; there is nothing else to save.
+// Identity. Backing dcc up is copying it and the history database beside it
+// (storage.FileName); there is nothing else to save.
 const FileName = "identity.json"
 
 // dirMode and fileMode keep both the Identity key and the database key to the

@@ -20,6 +20,10 @@ const (
 	disconnect
 	quit
 	help
+	// history, clearhistory: the stored Conversations. arg is the Display
+	// Name naming one.
+	history
+	clearhistory
 	// accept, refuse: the answers to a standing Security Code prompt.
 	accept
 	refuse
@@ -54,16 +58,18 @@ const (
 // docs/mvp.md's CLI section names; 'exit' and '?' are there because a
 // terminal program that refuses them is merely annoying.
 var commands = map[string]kind{
-	"invite":     invite,
-	"connect":    connect,
-	"disconnect": disconnect,
-	"quit":       quit,
-	"exit":       quit,
-	"help":       help,
-	"?":          help,
-	"msg":        text,
-	"accept":     accept,
-	"refuse":     refuse,
+	"invite":       invite,
+	"connect":      connect,
+	"disconnect":   disconnect,
+	"history":      history,
+	"clearhistory": clearhistory,
+	"quit":         quit,
+	"exit":         quit,
+	"help":         help,
+	"?":            help,
+	"msg":          text,
+	"accept":       accept,
+	"refuse":       refuse,
 }
 
 // answers maps the bare words that resolve a standing Security Code prompt.

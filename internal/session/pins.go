@@ -9,14 +9,15 @@ import (
 // Pins remembers which Identity each Display Name was last accepted with,
 // which is what turns a returning Peer's new key into the "Security Code
 // changed" warning instead of a fresh first meeting. The storage package
-// will implement it on the Conversation table; until then MemoryPins stands
-// in.
+// implements it on the Conversation table; MemoryPins stands in for tests
+// and for a Session that keeps no history.
 type Pins interface {
 	// Pinned reports the Identity name was last accepted with.
 	Pinned(name string) (identity.PublicKey, bool)
 	// Pin records that name was accepted with key, replacing any earlier
-	// pin.
-	Pin(name string, key identity.PublicKey)
+	// pin. An error means the acceptance was not recorded, and the caller
+	// must not proceed as if it had been.
+	Pin(name string, key identity.PublicKey) error
 }
 
 // MemoryPins is a Pins that lives and dies with the process.
@@ -39,8 +40,9 @@ func (p *MemoryPins) Pinned(name string) (identity.PublicKey, bool) {
 }
 
 // Pin implements Pins.
-func (p *MemoryPins) Pin(name string, key identity.PublicKey) {
+func (p *MemoryPins) Pin(name string, key identity.PublicKey) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.pins[name] = key
+	return nil
 }

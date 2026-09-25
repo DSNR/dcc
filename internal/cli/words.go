@@ -16,16 +16,18 @@ const welcome = "dcc — end-to-end encrypted chat, peer to peer. Type /help to 
 const hint = " enter sends · alt+enter new line · pgup/pgdn scroll back · /help · ctrl+c quit"
 
 // helpLines is what /help says. The commands are the ones docs/mvp.md names;
-// the ones that need a Call or history arrive with the work that gives them
-// something to do.
+// the ones that need a Call arrive with the work that gives them something
+// to do.
 var helpLines = []string{
 	"Commands:",
-	"  /invite            open a Rendezvous and print an Invite to hand over",
-	"  /connect <invite>  join someone else's Invite",
-	"  /msg <text>        say something that starts with a slash",
-	"  /disconnect        end the Session, stay in dcc",
-	"  /quit              end the Session and leave",
-	"  /help              this",
+	"  /invite               open a Rendezvous and print an Invite to hand over",
+	"  /connect <invite>     join someone else's Invite",
+	"  /msg <text>           say something that starts with a slash",
+	"  /history [name]       read a stored Conversation, no connection needed",
+	"  /clearhistory <name>  delete a Conversation from this device only",
+	"  /disconnect           end the Session, stay in dcc",
+	"  /quit                 end the Session and leave",
+	"  /help                 this",
 	"Anything else you type is sent to the other person. While no Session is",
 	"connected the commands work without their slash too, so 'invite' is enough.",
 }

@@ -38,6 +38,9 @@ type Options struct {
 	// Pins remembers accepted Identities across Sessions. Nil means a fresh
 	// in-memory store, which recognises no one.
 	Pins Pins
+	// History persists the Conversation as messages flow. Nil keeps
+	// nothing.
+	History History
 }
 
 // Session is one Session from Invite to disconnect, driven entirely through
@@ -49,6 +52,7 @@ type Session struct {
 	cert     transport.Certificate
 	tunnel   rendezvous.Tunnel
 	pins     Pins
+	history  History
 	events   *eventQueue
 
 	mu       sync.Mutex
@@ -90,6 +94,7 @@ func New(opts Options) (*Session, error) {
 		cert:     cert,
 		tunnel:   opts.Tunnel,
 		pins:     pins,
+		history:  opts.History,
 		events:   newEventQueue(),
 		state:    Idle,
 	}, nil
@@ -183,7 +188,11 @@ func (s *Session) Accept() error {
 	if s.closed || s.state != Verifying {
 		return fmt.Errorf("session: no Security Code prompt to accept while %s", s.state)
 	}
-	s.pins.Pin(s.peerName, s.peer)
+	if err := s.pins.Pin(s.peerName, s.peer); err != nil {
+		// The prompt still stands: nothing was pinned, nothing flows, and
+		// answering again retries.
+		return fmt.Errorf("session: recording the acceptance: %w", err)
+	}
 	s.accepted = true
 	s.maybeConnectLocked()
 	return nil
@@ -209,13 +218,20 @@ func (s *Session) SendText(body string) (string, error) {
 	if _, err := wire.Encode(f); err != nil {
 		return "", err
 	}
+	// Persist-before-send: a message that cannot be kept is not said, and
+	// the refusal is synchronous, like the wire's.
+	if s.history != nil {
+		if err := s.history.Outgoing(s.peer, s.peerName, f.ID, body, time.Now()); err != nil {
+			return "", fmt.Errorf("session: keeping the message: %w", err)
+		}
+	}
 	s.events.emit(TextStatus{ID: f.ID, Status: TextPending})
 	if err := s.trans.Send(f); err != nil {
-		s.events.emit(TextStatus{ID: f.ID, Status: TextFailed})
+		s.status(f.ID, TextFailed)
 		return "", err
 	}
 	s.unacked = append(s.unacked, f.ID)
-	s.events.emit(TextStatus{ID: f.ID, Status: TextSent})
+	s.status(f.ID, TextSent)
 	return f.ID, nil
 }
 
@@ -467,7 +483,23 @@ func (s *Session) onData(f wire.Frame) {
 func (s *Session) handleDataLocked(f wire.Frame) {
 	switch f := f.(type) {
 	case wire.Text:
-		s.events.emit(TextReceived{ID: f.ID, Body: f.Body, At: time.Now()})
+		at := time.Now()
+		// Persist-before-ack: the ack promises the message is kept, so a
+		// message that could not be kept gets no ack and is not shown — to
+		// the Peer it simply was not delivered.
+		if s.history != nil {
+			fresh, err := s.history.Incoming(s.peer, s.peerName, f.ID, f.Body, at)
+			if err != nil {
+				return
+			}
+			if !fresh {
+				// A resend of something already kept: acknowledged again,
+				// shown once.
+				_ = s.trans.Send(wire.Ack{ID: f.ID})
+				return
+			}
+		}
+		s.events.emit(TextReceived{ID: f.ID, Body: f.Body, At: at})
 		// The ack is application-level delivery: it says dcc took the
 		// message, not merely that SCTP moved the bytes.
 		_ = s.trans.Send(wire.Ack{ID: f.ID})
@@ -475,11 +507,22 @@ func (s *Session) handleDataLocked(f wire.Frame) {
 		for i, id := range s.unacked {
 			if id == f.ID {
 				s.unacked = append(s.unacked[:i], s.unacked[i+1:]...)
-				s.events.emit(TextStatus{ID: f.ID, Status: TextDelivered})
+				s.status(f.ID, TextDelivered)
 				return
 			}
 		}
 	}
+}
+
+// status moves one kept message's delivery along, in the History and on
+// screen together. The History write's error is deliberately dropped: the
+// message itself is already safe, and a stale status marker in tomorrow's
+// history is not worth ending today's Session over.
+func (s *Session) status(id string, status DeliveryStatus) {
+	if s.history != nil {
+		_ = s.history.Status(id, status)
+	}
+	s.events.emit(TextStatus{ID: id, Status: status})
 }
 
 // setStateLocked moves the machine and tells the UI. Callers hold s.mu.
@@ -501,7 +544,7 @@ func (s *Session) endLocked(state State, reason Reason) {
 func (s *Session) teardownLocked() {
 	s.closed = true
 	for _, id := range s.unacked {
-		s.events.emit(TextStatus{ID: id, Status: TextFailed})
+		s.status(id, TextFailed)
 	}
 	s.unacked = nil
 	conn, rdv, trans := s.conn, s.rdv, s.trans

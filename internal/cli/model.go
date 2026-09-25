@@ -39,6 +39,9 @@ type Options struct {
 	Name string
 	// New mints Sessions, one per Invite. Required.
 	New NewSession
+	// Store reads the stored Conversations back. Nil keeps and shows no
+	// history.
+	Store Store
 	// Warnings are put in front of the participant at startup — an Identity
 	// that had to be reset, chiefly.
 	Warnings []string
@@ -49,6 +52,7 @@ type Options struct {
 type Model struct {
 	name    string
 	newSess NewSession
+	store   Store
 
 	// sess is the running Session, nil when there is none. Only the events
 	// channel closing clears it, so that a Session is released exactly once,
@@ -106,6 +110,7 @@ func New(opts Options) Model {
 	m := Model{
 		name:    opts.Name,
 		newSess: opts.New,
+		store:   opts.Store,
 		state:   session.Idle,
 		index:   make(map[string]int),
 		view:    view,
@@ -207,6 +212,10 @@ func (m Model) submit(line string) (tea.Model, tea.Cmd) {
 		for _, line := range helpLines {
 			m.add(notice(line))
 		}
+	case history:
+		m.showHistory(c.arg)
+	case clearhistory:
+		m.clearHistory(c.arg)
 	case text:
 		return m.send(c.arg)
 	case unknown:
@@ -275,21 +284,28 @@ func (m Model) answer(yes bool) (tea.Model, tea.Cmd) {
 		m.add(notice("There is no Security Code to answer."))
 		return m, nil
 	}
-	name := m.prompt.Name
-	m.prompt = nil
-	m.layout()
+	name, peer := m.prompt.Name, m.prompt.Peer
 
 	if !yes {
-		m.add(notice(fmt.Sprintf("Refused — the Session is over. Nothing %q sent was shown.", name)))
 		if err := m.sess.Refuse(); err != nil {
 			m.add(notice(err.Error()))
+			return m, nil
 		}
+		m.prompt = nil
+		m.layout()
+		m.add(notice(fmt.Sprintf("Refused — the Session is over. Nothing %q sent was shown.", name)))
 		return m, nil
 	}
-	m.add(notice(fmt.Sprintf("Accepted — %q is verified, and content can flow.", name)))
+	// The prompt stays up if accepting failed — the acceptance was not
+	// recorded, so the question still stands and can be answered again.
 	if err := m.sess.Accept(); err != nil {
 		m.add(notice(err.Error()))
+		return m, nil
 	}
+	m.prompt = nil
+	m.layout()
+	m.add(notice(fmt.Sprintf("Accepted — %q is verified, and content can flow.", name)))
+	m.restoreHistory(peer, name)
 	return m, nil
 }
 
