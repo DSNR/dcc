@@ -141,3 +141,28 @@ already timed out be discarded. `media` is the sender's stream state and is
 meaningful only while a Call is Active, which is why it needs no `call_id` —
 but all three of its fields are required, since a missing one would otherwise
 read as "off".
+
+## Call media
+
+A Call's audio and video do not travel as frames at all: they are RTP over
+the same DTLS-protected PeerConnection the DataChannel uses, so they are
+encrypted by SRTP under keys the Noise handshake already authenticated.
+
+Accepting a Call renegotiates once, with `offer` and `answer` on the
+Signaling path, and brings up all three transceivers together — microphone,
+camera, screen. Muting, turning a camera off and starting a screen share are
+then a matter of writing frames or not, plus the `media` frame that says so;
+none of them renegotiates. Both sides make their transceivers when they
+accept, but only one side offers, and an offer that arrives before the other
+side has got there makes its transceivers for it — the two accepts travel on
+different transports, so neither can assume it was first.
+
+Audio is **G.711 µ-law — PCMU, RTP payload type 0, 8 kHz mono, 20 ms
+frames**; ADR 0004 records why it is not Opus. A received RTP packet with an
+empty payload is padding, and is skipped rather than decoded: it carries no
+audio, and playing it would be a frame of silence nobody sent.
+
+A Call does not survive a reconnect. The media path is rebuilt from nothing,
+and reviving a Call silently across a gap is worse than ringing again. An
+unanswered Call rings for **60 seconds**; both sides count it, so a lost
+`reject` still ends the Call at both ends.

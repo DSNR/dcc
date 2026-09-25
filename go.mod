@@ -9,9 +9,13 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/coder/websocket v1.8.15
 	github.com/flynn/noise v1.1.0
+	github.com/go-ole/go-ole v1.3.0
 	github.com/google/uuid v1.6.0
+	github.com/jfreymuth/pulse v0.1.3
+	github.com/moutend/go-wca v0.3.0
 	github.com/muesli/termenv v0.16.0
 	github.com/pion/ice/v4 v4.4.2
+	github.com/pion/interceptor v0.1.48
 	github.com/pion/webrtc/v4 v4.2.20
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
@@ -38,7 +42,6 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.8 // indirect
-	github.com/pion/interceptor v0.1.48 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/mdns/v2 v2.2.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect

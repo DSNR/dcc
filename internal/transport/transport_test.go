@@ -23,6 +23,8 @@ type end struct {
 	up     chan transport.Link
 	frames chan wire.Frame
 	down   chan error
+	audio  chan []byte
+	media  chan struct{}
 }
 
 func newCertificate(t *testing.T) transport.Certificate {
@@ -43,11 +45,25 @@ func start(t *testing.T, opts transport.Options) *end {
 		up:     make(chan transport.Link, 1),
 		frames: make(chan wire.Frame, 64),
 		down:   make(chan error, 1),
+		audio:  make(chan []byte, 256),
+		media:  make(chan struct{}, 8),
 	}
 	opts.Signal = func(f wire.Frame) { e.toPeer <- f }
 	opts.Up = func(l transport.Link) { e.up <- l }
 	opts.Frame = func(f wire.Frame) { e.frames <- f }
 	opts.Down = func(err error) { e.down <- err }
+	opts.Audio = func(payload []byte) {
+		select {
+		case e.audio <- append([]byte(nil), payload...):
+		default:
+		}
+	}
+	opts.MediaUp = func() {
+		select {
+		case e.media <- struct{}{}:
+		default:
+		}
+	}
 	tr, err := transport.Start(opts)
 	if err != nil {
 		t.Fatalf("Start: %v", err)

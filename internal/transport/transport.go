@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pion/ice/v4"
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/DSNR/dcc/internal/wire"
@@ -80,6 +81,15 @@ type Options struct {
 	Up func(Link)
 	// Frame delivers each decoded DataChannel frame.
 	Frame func(wire.Frame)
+	// Audio delivers each received audio frame's encoded payload, in the
+	// codec the media package defines. Nil means a Call is heard by nobody.
+	Audio func(payload []byte)
+	// MediaUp fires when the Call's transceivers are in place: once when
+	// they are first negotiated, and again for each later StartMedia that
+	// finds them already there. It is deliberately not tied to the first
+	// RTP packet — a Call answered muted sends none, and is a Call
+	// nonetheless.
+	MediaUp func()
 	// Down fires at most once, when the Transport dies — before or after Up,
 	// but never after Close.
 	Down func(error)
@@ -122,6 +132,16 @@ type Transport struct {
 	remoteSet bool
 	heldIn    []webrtc.ICECandidateInit
 	ended     bool
+	// mediaStarted claims the one-time transceiver negotiation a Call needs,
+	// so that both sides asking for it — and an offer that asks for it on
+	// their behalf — add the transceivers exactly once.
+	mediaStarted bool
+	// audio is the local microphone track, nil until media is negotiated.
+	audio *webrtc.TrackLocalStaticSample
+	// mediaUp reports that the Call's transceivers are negotiated. It claims
+	// the one MediaUp that the negotiation itself fires, and is what lets a
+	// later StartMedia answer immediately.
+	mediaUp bool
 
 	offerTimer, connectTimer *time.Timer
 }
@@ -144,6 +164,15 @@ func Start(opts Options) (*Transport, error) {
 	var se webrtc.SettingEngine
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 
+	engine, err := mediaEngine()
+	if err != nil {
+		return nil, err
+	}
+	interceptors := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptors(engine, interceptors); err != nil {
+		return nil, fmt.Errorf("transport: registering the interceptors: %w", err)
+	}
+
 	servers := []webrtc.ICEServer{{URLs: stunServers}}
 	var mux ice.TCPMux
 	if opts.RelayListener != nil || opts.RelayAddr != "" {
@@ -162,7 +191,7 @@ func Start(opts Options) (*Transport, error) {
 			se.SetICETCPMux(mux)
 		}
 	}
-	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(se), webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(interceptors))
 
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers:   servers,
@@ -193,6 +222,7 @@ func Start(opts Options) (*Transport, error) {
 	dc.OnClose(func() { t.fail(errors.New("transport: the DataChannel closed")) })
 	pc.OnICECandidate(t.onCandidate)
 	pc.OnConnectionStateChange(t.onConnectionState)
+	pc.OnTrack(t.onTrack)
 
 	// The timers are armed under the lock because their callbacks read the
 	// fields they are being assigned to.
@@ -276,9 +306,19 @@ func (t *Transport) onOffer(f wire.Offer) {
 	initiator := t.opts.Initiator
 	t.mu.Unlock()
 	if initiator {
-		// Renegotiation arrives with the Call work; until then an offer at
-		// the initiator is noise.
+		// Only one side renegotiates, and it is this one — an offer arriving
+		// here is noise.
 		return
+	}
+	// An offer carrying the Call's streams is the other side accepting a
+	// Call. The two accepts travel on different transports, so this side may
+	// not have got there yet; making the tracks now is what keeps the answer
+	// sendrecv rather than receive-only.
+	if offerHasMedia(f.SDP) {
+		if err := t.StartMedia(); err != nil {
+			t.fail(err)
+			return
+		}
 	}
 	if err := t.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: f.SDP}); err != nil {
 		t.fail(fmt.Errorf("transport: applying the remote offer: %w", err))
@@ -295,6 +335,9 @@ func (t *Transport) onOffer(f wire.Offer) {
 	}
 	t.sendDescription(wire.Answer{SDP: answer.SDP})
 	t.releaseRemoteCandidates()
+	if offerHasMedia(f.SDP) {
+		t.mediaNegotiated()
+	}
 }
 
 // onAnswer is the initiator receiving the responder's answer.
@@ -307,6 +350,9 @@ func (t *Transport) onAnswer(f wire.Answer) {
 		return
 	}
 	t.releaseRemoteCandidates()
+	if offerHasMedia(f.SDP) {
+		t.mediaNegotiated()
+	}
 }
 
 // onCandidate trickles one gathered candidate to the other side, or holds it

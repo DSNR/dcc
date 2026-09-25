@@ -16,13 +16,17 @@ const welcome = "dcc — end-to-end encrypted chat, peer to peer. Type /help to 
 const hint = " enter sends · alt+enter new line · pgup/pgdn scroll back · /help · ctrl+c quit"
 
 // helpLines is what /help says. The commands are the ones docs/mvp.md names;
-// the ones that need a Call arrive with the work that gives them something
+// the ones that need a camera arrive with the work that gives them something
 // to do.
 var helpLines = []string{
 	"Commands:",
 	"  /invite               open a Rendezvous and print an Invite to hand over",
 	"  /connect <invite>     join someone else's Invite",
 	"  /msg <text>           say something that starts with a slash",
+	"  /call                 ring the other person",
+	"  /answer  /reject      pick up or turn down a Call ringing here",
+	"  /mute    /unmute      stop or resume sending your microphone",
+	"  /hangup               end the Call, stay connected for text",
 	"  /history [name]       read a stored Conversation, no connection needed",
 	"  /clearhistory <name>  delete a Conversation from this device only",
 	"  /disconnect           end the Session, stay in dcc",
@@ -81,6 +85,46 @@ func linkNotice(l transport.Link) string {
 	}
 }
 
+// callNotice is what a Call transition is worth saying in the conversation.
+// The reason comes first: why a Call ended is the whole of what someone
+// wants to know when it does.
+func callNotice(e session.CallChanged, peer string) string {
+	switch e.Reason {
+	case session.CallDeclined:
+		return quoted(peer) + " turned the Call down."
+	case session.CallBusy:
+		return quoted(peer) + " is already in a Call."
+	case session.CallTimedOut:
+		return "The Call rang out unanswered."
+	case session.CallEnded:
+		return "The Call ended. You are still connected for text."
+	case session.CallLost:
+		return "The Call dropped with the connection. Call again once you are back."
+	case session.CallFailed:
+		return "The Call could not be set up — no media path came together."
+	}
+	switch e.State {
+	case session.Incoming:
+		return quoted(peer) + " is calling — /answer to pick up, /reject to turn it down."
+	case session.Negotiating:
+		return "Setting the Call up…"
+	case session.Active:
+		return "In a Call — /mute to stop sending your microphone, /hangup to end it."
+	}
+	// Ringing is announced by the command that caused it.
+	return ""
+}
+
+// micNotice is the other side's microphone changing state. Muting is worth
+// saying out loud: silence that is deliberate and silence that is broken
+// sound exactly the same.
+func micNotice(live bool, peer string) string {
+	if live {
+		return quoted(peer) + " unmuted."
+	}
+	return quoted(peer) + " muted their microphone."
+}
+
 // promptRecord is what a Security Code prompt leaves in the conversation: the
 // code in the groups it is meant to be read in, and who is claiming it. The
 // question itself is not here — it belongs to the standing panel, and must
@@ -124,6 +168,9 @@ func (m Model) statusLine() string {
 	if m.state == session.Connected && m.link != 0 {
 		parts = append(parts, m.link.String())
 	}
+	if m.call != session.NoCall {
+		parts = append(parts, m.callStatus())
+	}
 	if m.prompt != nil {
 		parts = append(parts, "Security Code unanswered")
 	}
@@ -131,6 +178,29 @@ func (m Model) statusLine() string {
 		parts = append(parts, "you are "+quoted(m.name))
 	}
 	return " " + strings.Join(parts, " · ") + " "
+}
+
+// callStatus is where the Call stands, on the status line: what it is doing,
+// and — once it is running — whose microphone is off.
+func (m Model) callStatus() string {
+	switch m.call {
+	case session.Ringing:
+		return "calling"
+	case session.Incoming:
+		return "incoming Call — /answer or /reject"
+	case session.Negotiating:
+		return "Call connecting"
+	case session.Active:
+		status := "in a Call"
+		if m.sess != nil && m.sess.Muted() {
+			status += " · muted"
+		}
+		if !m.remoteMic {
+			status += " · they are muted"
+		}
+		return status
+	}
+	return ""
 }
 
 // quoted renders a Display Name in a way that cannot be mistaken for dcc's

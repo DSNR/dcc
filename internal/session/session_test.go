@@ -125,6 +125,28 @@ func assertQuiet(t *testing.T, s *session.Session) {
 	}
 }
 
+// assertNoMoreText fails if another message surfaces within the quiet
+// window. It ignores everything else deliberately: a blip's own transitions
+// may still be arriving, and which side notices the drop first is a race
+// that says nothing about whether a message was shown twice.
+func assertNoMoreText(t *testing.T, s *session.Session) {
+	t.Helper()
+	deadline := time.After(quiet)
+	for {
+		select {
+		case e, ok := <-s.Events():
+			if !ok {
+				t.Fatalf("events channel closed while no message was expected")
+			}
+			if tr, isText := e.(session.TextReceived); isText {
+				t.Fatalf("the message was shown again: %#v", tr)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
 // waitLink drains events until Connected's sub-status is announced.
 func waitLink(t *testing.T, s *session.Session) session.LinkChanged {
 	t.Helper()

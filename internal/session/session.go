@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/DSNR/dcc/internal/identity"
+	"github.com/DSNR/dcc/internal/media"
 	"github.com/DSNR/dcc/internal/relay"
 	"github.com/DSNR/dcc/internal/rendezvous"
 	"github.com/DSNR/dcc/internal/signaling"
@@ -49,6 +50,12 @@ type Options struct {
 	// fallback relay as the only route. Tests use it to prove the relay
 	// carries a Session alone.
 	RelayOnly bool
+	// Devices is where a Call's microphone and speaker come from. Nil means
+	// the real ones; tests pass a media.Fake.
+	Devices media.Devices
+	// RingWait overrides RingTimeout; zero means the protocol value. Tests
+	// shorten it.
+	RingWait time.Duration
 }
 
 // Session is one Session from Invite to disconnect, driven entirely through
@@ -63,6 +70,8 @@ type Session struct {
 	history  History
 	events   *eventQueue
 	budget   time.Duration
+	devices  media.Devices
+	ringWait time.Duration
 
 	mu       sync.Mutex
 	state    State
@@ -112,6 +121,23 @@ type Session struct {
 	redialing      bool
 	reconnectUntil time.Time
 	reconnectTimer *time.Timer
+
+	// The Call inside this Session, of which there is at most one. callID is
+	// empty exactly when callState is NoCall; audio is the open devices,
+	// held only while the Call is Active.
+	callState CallState
+	callID    string
+	ringTimer *time.Timer
+	audio     *media.Audio
+	muted     bool
+	// noMic records that this machine's microphone could not be opened, so
+	// that unmuting one that does not exist is refused rather than
+	// announced.
+	noMic bool
+	// remoteMedia is the other side's last announced stream state, held so
+	// that one that arrives before this side is Active is not lost.
+	remoteMedia     MediaChanged
+	haveRemoteMedia bool
 }
 
 // outText is one message the other side hasn't acknowledged: sent and
@@ -140,6 +166,10 @@ func New(opts Options) (*Session, error) {
 	if budget == 0 {
 		budget = ReconnectBudget
 	}
+	ring := opts.RingWait
+	if ring == 0 {
+		ring = RingTimeout
+	}
 	return &Session{
 		identity:  opts.Identity,
 		name:      opts.Name,
@@ -149,6 +179,8 @@ func New(opts Options) (*Session, error) {
 		history:   opts.History,
 		events:    newEventQueue(),
 		budget:    budget,
+		devices:   opts.Devices,
+		ringWait:  ring,
 		relayOnly: opts.RelayOnly,
 		state:     Idle,
 		seen:      make(map[string]bool),
@@ -461,9 +493,11 @@ func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiato
 			defer cancel()
 			_ = conn.Send(ctx, f)
 		},
-		Up:    func(link transport.Link) { s.onTransportUp(gen, link) },
-		Frame: func(f wire.Frame) { s.onData(gen, f) },
-		Down:  func(err error) { s.onTransportDown(gen, err) },
+		Up:      func(link transport.Link) { s.onTransportUp(gen, link) },
+		Frame:   func(f wire.Frame) { s.onData(gen, f) },
+		Down:    func(err error) { s.onTransportDown(gen, err) },
+		Audio:   func(payload []byte) { s.onAudio(gen, payload) },
+		MediaUp: func() { s.onMediaUp(gen) },
 	}
 	if s.isHost {
 		s.relayListener = relay.NewListener()
@@ -636,6 +670,8 @@ func (s *Session) handleDataLocked(f wire.Frame) {
 		// The ack is application-level delivery: it says dcc took the
 		// message, not merely that SCTP moved the bytes.
 		_ = s.trans.Send(wire.Ack{ID: f.ID})
+	case wire.Call, wire.Accept, wire.Reject, wire.Hangup, wire.Media:
+		s.handleCallLocked(f)
 	case wire.Ack:
 		for i := range s.queue {
 			if s.queue[i].id == f.ID {
@@ -675,6 +711,7 @@ func (s *Session) endLocked(state State, reason Reason) {
 // Session ending is the answer they were waiting for. The slow parts —
 // cloudflared dying — run off the caller's back.
 func (s *Session) teardownLocked() {
+	s.endCallLocked(CallLost)
 	s.closed = true
 	s.gen++
 	if s.reconnectTimer != nil {

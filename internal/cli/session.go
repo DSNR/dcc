@@ -25,6 +25,18 @@ type Session interface {
 	// SendText sends one message and returns the id its statuses arrive
 	// against.
 	SendText(body string) (string, error)
+	// Call rings the other person and returns the new Call's id.
+	Call() (string, error)
+	// Answer picks up the Call ringing here.
+	Answer() error
+	// Reject turns down the Call ringing here.
+	Reject() error
+	// Hangup ends the Call, leaving the Session up for text.
+	Hangup() error
+	// Mute stops or resumes sending this side's microphone.
+	Mute(muted bool) error
+	// Muted reports whether this side's microphone is being sent.
+	Muted() bool
 	// Close ends the Session and releases everything it holds.
 	Close() error
 }

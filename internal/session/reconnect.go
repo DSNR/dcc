@@ -39,6 +39,8 @@ func (s *Session) connectionLostLocked() {
 // Entered again while already Reconnecting — a replacement that died too —
 // it keeps the original deadline: the budget is per outage, not per attempt.
 func (s *Session) enterReconnectLocked() {
+	// A Call does not survive the media path being rebuilt from nothing.
+	s.endCallLocked(CallLost)
 	s.gen++
 	conn, trans := s.conn, s.trans
 	s.conn, s.trans = nil, nil

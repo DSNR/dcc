@@ -64,10 +64,16 @@ type fakeSession struct {
 	refuses int
 	sent    []string
 	closes  int
+	calls   int
+	answers int
+	rejects int
+	hangups int
+	mutes   []bool
+	muted   bool
 
-	// hostErr, joinErr and sendErr are what the next matching command
-	// returns; zero means it succeeds.
-	hostErr, joinErr, sendErr error
+	// hostErr, joinErr, sendErr and callErr are what the next matching
+	// command returns; zero means it succeeds.
+	hostErr, joinErr, sendErr, callErr error
 }
 
 func newFake() *fakeSession {
@@ -112,6 +118,58 @@ func (f *fakeSession) SendText(body string) (string, error) {
 	}
 	f.sent = append(f.sent, body)
 	return fmt.Sprintf("00000000-0000-7000-8000-%012d", len(f.sent)), nil
+}
+
+func (f *fakeSession) Call() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.callErr != nil {
+		return "", f.callErr
+	}
+	f.calls++
+	return fmt.Sprintf("00000000-0000-7000-8000-%012d", f.calls), nil
+}
+
+func (f *fakeSession) Answer() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.answers++
+	return nil
+}
+
+func (f *fakeSession) Reject() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rejects++
+	return nil
+}
+
+func (f *fakeSession) Hangup() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hangups++
+	return nil
+}
+
+func (f *fakeSession) Mute(muted bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mutes = append(f.mutes, muted)
+	f.muted = muted
+	return nil
+}
+
+func (f *fakeSession) Muted() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.muted
+}
+
+// callCounts is what the TUI asked of the Call controls.
+func (f *fakeSession) callCounts() (calls, answers, rejects, hangups int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls, f.answers, f.rejects, f.hangups
 }
 
 // Close ends the fake the way a real Session does: the events channel closing

@@ -67,6 +67,12 @@ type Model struct {
 	// prompt is the standing Security Code prompt, nil when none stands.
 	prompt *session.VerifyPrompt
 
+	// call is where the Call inside the Session stands, and remoteMic is
+	// what the other side last said about their microphone. Both are only
+	// meaningful while a Call is running.
+	call      session.CallState
+	remoteMic bool
+
 	// log is everything that has happened, in order; index finds the entry a
 	// delivery status belongs to.
 	log   []entry
@@ -216,6 +222,18 @@ func (m Model) submit(line string) (tea.Model, tea.Cmd) {
 		m.showHistory(c.arg)
 	case clearhistory:
 		m.clearHistory(c.arg)
+	case placeCall:
+		return m.placeCall()
+	case answerCall:
+		return m.answerCall()
+	case rejectCall:
+		return m.rejectCall()
+	case hangUp:
+		return m.hangUp()
+	case mute:
+		return m.setMuted(true)
+	case unmute:
+		return m.setMuted(false)
 	case text:
 		return m.send(c.arg)
 	case unknown:
@@ -334,6 +352,78 @@ func (m Model) send(body string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// placeCall rings the other person.
+func (m Model) placeCall() (tea.Model, tea.Cmd) {
+	if m.sess == nil || m.state != session.Connected {
+		m.add(notice("There is nobody to call — connect first."))
+		return m, nil
+	}
+	if m.call != session.NoCall {
+		m.add(notice("There is already a Call — /hangup to end it first."))
+		return m, nil
+	}
+	if _, err := m.sess.Call(); err != nil {
+		m.add(notice("Could not call: " + err.Error()))
+		return m, nil
+	}
+	m.add(notice("Calling " + quoted(m.peerName()) + " — /hangup to give up."))
+	return m, nil
+}
+
+// answerCall picks up the Call that is ringing here.
+func (m Model) answerCall() (tea.Model, tea.Cmd) {
+	if m.sess == nil || m.call != session.Incoming {
+		m.add(notice("There is no Call to answer."))
+		return m, nil
+	}
+	if err := m.sess.Answer(); err != nil {
+		m.add(notice("Could not answer: " + err.Error()))
+	}
+	return m, nil
+}
+
+// rejectCall turns down the Call that is ringing here.
+func (m Model) rejectCall() (tea.Model, tea.Cmd) {
+	if m.sess == nil || m.call != session.Incoming {
+		m.add(notice("There is no Call to reject."))
+		return m, nil
+	}
+	if err := m.sess.Reject(); err != nil {
+		m.add(notice("Could not reject: " + err.Error()))
+	}
+	return m, nil
+}
+
+// hangUp ends the Call and leaves the Session up for text.
+func (m Model) hangUp() (tea.Model, tea.Cmd) {
+	if m.sess == nil || m.call == session.NoCall {
+		m.add(notice("There is no Call to hang up. /disconnect ends the Session."))
+		return m, nil
+	}
+	if err := m.sess.Hangup(); err != nil {
+		m.add(notice(err.Error()))
+	}
+	return m, nil
+}
+
+// setMuted stops or resumes this side's microphone.
+func (m Model) setMuted(muted bool) (tea.Model, tea.Cmd) {
+	if m.sess == nil || m.call == session.NoCall {
+		m.add(notice("There is no Call to mute."))
+		return m, nil
+	}
+	if err := m.sess.Mute(muted); err != nil {
+		m.add(notice(err.Error()))
+		return m, nil
+	}
+	if muted {
+		m.add(notice("Microphone muted — they can see that you are."))
+	} else {
+		m.add(notice("Microphone live."))
+	}
+	return m, nil
+}
+
 // disconnect ends the Session but stays in the app, so that the conversation
 // can be read back and another Invite made.
 func (m Model) disconnect() (tea.Model, tea.Cmd) {
@@ -395,6 +485,21 @@ func (m *Model) apply(e session.Event) {
 	case session.TextReceived:
 		m.add(entry{at: e.At, who: m.peerName(), body: e.Body})
 
+	case session.CallChanged:
+		m.call = e.State
+		// A Call starts with both microphones live; the other side's own
+		// media state follows and corrects this if it does not.
+		m.remoteMic = e.State == session.Active
+		if said := callNotice(e, m.peerName()); said != "" {
+			m.add(notice(said))
+		}
+
+	case session.MediaChanged:
+		if m.remoteMic != e.Mic {
+			m.remoteMic = e.Mic
+			m.add(notice(micNotice(e.Mic, m.peerName())))
+		}
+
 	case session.TextStatus:
 		if i, known := m.index[e.ID]; known {
 			m.log[i].status = e.Status
@@ -409,6 +514,8 @@ func (m *Model) released() {
 	m.sess = nil
 	m.prompt = nil
 	m.link = 0
+	m.call = session.NoCall
+	m.remoteMic = false
 	m.layout()
 	if m.state == session.Idle {
 		// It never got going — a refused Invite string, say. Whatever

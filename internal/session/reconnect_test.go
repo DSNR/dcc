@@ -43,8 +43,8 @@ func TestReconnectResendsWithoutDuplicates(t *testing.T) {
 	if got := waitText(t, host); got.ID != id {
 		t.Fatalf("host received %#v, want the queued message %s", got, id)
 	}
-	// Exactly once: nothing else surfaces on the host.
-	assertQuiet(t, host)
+	// Exactly once: the message does not surface on the host again.
+	assertNoMoreText(t, host)
 
 	// The healed Session is a working Session, both ways.
 	reply, err := host.SendText("loud and clear")
@@ -76,7 +76,7 @@ func TestReconnectResendsUnacked(t *testing.T) {
 	if got := waitText(t, host); got.ID != id {
 		t.Fatalf("host received %#v, want %s", got, id)
 	}
-	assertQuiet(t, host)
+	assertNoMoreText(t, host)
 }
 
 // TestCrashedPeerRejoins closes the Peer outright — a crash, as the Host

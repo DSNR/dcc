@@ -27,6 +27,14 @@ const (
 	// accept, refuse: the answers to a standing Security Code prompt.
 	accept
 	refuse
+	// placeCall, answerCall, rejectCall, hangUp: the Call controls.
+	placeCall
+	answerCall
+	rejectCall
+	hangUp
+	// mute, unmute: the microphone, which only a Call has.
+	mute
+	unmute
 	// unknown: a slash command that is not one. arg is what was typed.
 	unknown
 )
@@ -70,6 +78,12 @@ var commands = map[string]kind{
 	"msg":          text,
 	"accept":       accept,
 	"refuse":       refuse,
+	"call":         placeCall,
+	"answer":       answerCall,
+	"reject":       rejectCall,
+	"hangup":       hangUp,
+	"mute":         mute,
+	"unmute":       unmute,
 }
 
 // answers maps the bare words that resolve a standing Security Code prompt.
