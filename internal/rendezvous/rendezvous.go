@@ -16,6 +16,11 @@ import (
 // path; the Rendezvous serves nothing else that matters.
 const PathSignal = "/v1/signal"
 
+// PathRelay is where the fallback relay's WebSockets arrive when direct
+// connection fails. Each carries only DTLS ciphertext — the Rendezvous
+// forwards bytes it cannot read.
+const PathRelay = "/v1/relay"
+
 // hint is what a browser gets at /. Someone who was handed an Invite and
 // opened it the obvious way is not lost, only in the wrong program, and this
 // is the only chance to tell them so.
@@ -50,6 +55,9 @@ type Options struct {
 	// Signal handles the Signaling WebSocket at PathSignal. Nil serves
 	// nothing there, which is only useful in tests of the Rendezvous itself.
 	Signal http.Handler
+	// Relay handles the fallback relay's WebSockets at PathRelay. Nil serves
+	// nothing there, and the Session simply has no relay to fall back on.
+	Relay http.Handler
 }
 
 // Rendezvous is a running Rendezvous: a local HTTP server, the tunnel
@@ -91,6 +99,9 @@ func Start(ctx context.Context, opts Options) (*Rendezvous, error) {
 	mux.HandleFunc("/{$}", serveHint)
 	if opts.Signal != nil {
 		mux.Handle(PathSignal, opts.Signal)
+	}
+	if opts.Relay != nil {
+		mux.Handle(PathRelay, opts.Relay)
 	}
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: headerTimeout}
 	go func() {

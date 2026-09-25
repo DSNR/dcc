@@ -3,6 +3,8 @@ package transport
 import (
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,8 +43,9 @@ type Link int
 const (
 	// LinkDirect: the selected candidate pair goes peer to peer.
 	LinkDirect Link = iota + 1
-	// LinkRelayed: content is flowing through a relay. Unreachable until the
-	// Rendezvous relay fallback lands — there is no TURN to fall back on.
+	// LinkRelayed: content is flowing through the Rendezvous's fallback
+	// relay. In dcc that is any TCP candidate pair — ICE-TCP exists here
+	// only as the relay path; there is no TURN.
 	LinkRelayed
 )
 
@@ -83,6 +86,19 @@ type Options struct {
 	// OfferWait and ConnectWait override OfferTimeout and ConnectTimeout;
 	// zero means the protocol value. Tests shorten them.
 	OfferWait, ConnectWait time.Duration
+	// RelayListener is the Host's side of the fallback relay: a listener
+	// whose connections arrive through the Rendezvous, fed to pion's TCPMux
+	// so ICE-TCP runs over them. Non-nil hands its ownership to the
+	// Transport, which closes it when it ends.
+	RelayListener net.Listener
+	// RelayAddr is the Peer's side of the fallback relay: the local bridge
+	// that reaches the Rendezvous. Non-empty, every passive TCP candidate
+	// the other side advertises is rewritten to it before pion dials.
+	RelayAddr string
+	// RelayOnly disables every direct path — UDP and STUN — leaving the
+	// fallback relay as the only route. Tests use it to prove the relay
+	// carries a Session alone.
+	RelayOnly bool
 }
 
 // Transport is one WebRTC PeerConnection's worth of connectivity: the
@@ -92,6 +108,9 @@ type Transport struct {
 	opts Options
 	pc   *webrtc.PeerConnection
 	dc   *webrtc.DataChannel
+	// mux is the Host's ICE-TCP mux over the relay listener, nil on the
+	// Peer's side and when there is no relay at all.
+	mux ice.TCPMux
 
 	mu sync.Mutex
 	// descSent gates outgoing candidates: trickled ICE must never overtake
@@ -124,22 +143,47 @@ func Start(opts Options) (*Transport, error) {
 	// resolution step that can fail.
 	var se webrtc.SettingEngine
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+
+	servers := []webrtc.ICEServer{{URLs: stunServers}}
+	var mux ice.TCPMux
+	if opts.RelayListener != nil || opts.RelayAddr != "" {
+		// The relay lives on loopback at both ends — the Host's mux address
+		// and the Peer's bridge — so loopback gathering is what makes pion
+		// advertise the one and dial the other.
+		se.SetIncludeLoopbackCandidate(true)
+		networks := []webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6, webrtc.NetworkTypeTCP4}
+		if opts.RelayOnly {
+			networks = []webrtc.NetworkType{webrtc.NetworkTypeTCP4}
+			servers = nil
+		}
+		se.SetNetworkTypes(networks)
+		if opts.RelayListener != nil {
+			mux = ice.NewTCPMuxDefault(ice.TCPMuxParams{Listener: opts.RelayListener, ReadBufferSize: 8})
+			se.SetICETCPMux(mux)
+		}
+	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
-		ICEServers:   []webrtc.ICEServer{{URLs: stunServers}},
+		ICEServers:   servers,
 		Certificates: []webrtc.Certificate{opts.Certificate.cert},
 	})
 	if err != nil {
+		if mux != nil {
+			_ = mux.Close()
+		}
 		return nil, fmt.Errorf("transport: building the PeerConnection: %w", err)
 	}
 
-	t := &Transport{opts: opts, pc: pc}
+	t := &Transport{opts: opts, pc: pc, mux: mux}
 
 	negotiated, id := true, uint16(0)
 	dc, err := pc.CreateDataChannel(channelLabel, &webrtc.DataChannelInit{Negotiated: &negotiated, ID: &id})
 	if err != nil {
 		_ = pc.Close()
+		if mux != nil {
+			_ = mux.Close()
+		}
 		return nil, fmt.Errorf("transport: creating the %s DataChannel: %w", channelLabel, err)
 	}
 	t.dc = dc
@@ -315,8 +359,12 @@ func (t *Transport) onRemoteCandidate(f wire.ICE) {
 	if f.Candidate == "" {
 		return
 	}
+	candidate := f.Candidate
+	if t.opts.RelayAddr != "" {
+		candidate = rewriteRelayCandidate(candidate, t.opts.RelayAddr)
+	}
 	mid, mline := f.Mid, uint16(f.MLine)
-	init := webrtc.ICECandidateInit{Candidate: f.Candidate, SDPMid: &mid, SDPMLineIndex: &mline}
+	init := webrtc.ICECandidateInit{Candidate: candidate, SDPMid: &mid, SDPMLineIndex: &mline}
 	t.mu.Lock()
 	if !t.remoteSet {
 		t.heldIn = append(t.heldIn, init)
@@ -326,6 +374,36 @@ func (t *Transport) onRemoteCandidate(f wire.ICE) {
 	t.mu.Unlock()
 	// A candidate that won't apply is one route lost, not the exchange dead.
 	_ = t.pc.AddICECandidate(init)
+}
+
+// rewriteRelayCandidate points a passive TCP candidate at addr. The other
+// side's relay listener sits behind its Rendezvous, not at the address the
+// candidate names — the local bridge at addr is what actually reaches it.
+// Anything else — UDP, active TCP, a shape this doesn't recognise — passes
+// through untouched.
+func rewriteRelayCandidate(candidate, addr string) string {
+	fields := strings.Fields(candidate)
+	// candidate:<foundation> <component> <transport> <priority> <address>
+	// <port> typ <type>, then extension pairs — tcptype among them.
+	if len(fields) < 8 || !strings.EqualFold(fields[2], "tcp") {
+		return candidate
+	}
+	passive := false
+	for i := 8; i+1 < len(fields); i += 2 {
+		if fields[i] == "tcptype" && fields[i+1] == "passive" {
+			passive = true
+			break
+		}
+	}
+	if !passive {
+		return candidate
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return candidate
+	}
+	fields[4], fields[5] = host, port
+	return strings.Join(fields, " ")
 }
 
 // releaseRemoteCandidates opens the incoming gate once the remote description
@@ -366,14 +444,15 @@ func (t *Transport) onOpen() {
 }
 
 // link reads the selected candidate pair's verdict: relayed if either end is
-// a relay candidate, direct otherwise.
+// a relay candidate or the pair runs over TCP — dcc's only TCP path is the
+// Rendezvous relay — direct otherwise.
 func (t *Transport) link() Link {
 	pair, err := t.pc.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
 	if err != nil || pair == nil {
 		return LinkDirect
 	}
-	if (pair.Local != nil && pair.Local.Typ == webrtc.ICECandidateTypeRelay) ||
-		(pair.Remote != nil && pair.Remote.Typ == webrtc.ICECandidateTypeRelay) {
+	if (pair.Local != nil && (pair.Local.Typ == webrtc.ICECandidateTypeRelay || pair.Local.Protocol == webrtc.ICEProtocolTCP)) ||
+		(pair.Remote != nil && (pair.Remote.Typ == webrtc.ICECandidateTypeRelay || pair.Remote.Protocol == webrtc.ICEProtocolTCP)) {
 		return LinkRelayed
 	}
 	return LinkDirect
@@ -415,6 +494,8 @@ func (t *Transport) fail(err error) {
 }
 
 // end claims the one transition into ended, stopping the timers on the way.
+// The relay mux goes down with the Transport — off this goroutine, because
+// closing it waits for connection handlers pion may be calling us from.
 func (t *Transport) end() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -426,5 +507,9 @@ func (t *Transport) end() bool {
 		t.offerTimer.Stop()
 	}
 	t.connectTimer.Stop()
+	if t.mux != nil {
+		mux := t.mux
+		go func() { _ = mux.Close() }()
+	}
 	return true
 }

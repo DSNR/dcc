@@ -40,6 +40,16 @@ The two transports carry disjoint sets of types.
 | `PathSignal` | the Noise-encrypted WebSocket at the Rendezvous | `offer`, `answer`, `ice`, `rejected` |
 | `PathData` | the WebRTC DataChannel | `text`, `ack`, `bye`, `call`, `accept`, `reject`, `hangup`, `media` |
 
+A third endpoint at the Rendezvous, `/v1/relay`, carries no frames of its
+own: it is the fallback relay. When no direct path works, the Peer's ICE
+agent reaches the Host over ICE-TCP — each relay WebSocket is one TCP
+connection's worth of RFC 4571-framed packets, spliced into the Host's TCP
+mux. What crosses it is the same DTLS ciphertext a direct path would carry,
+under certificates the Noise handshake authenticated, so the relay endpoint
+needs no authentication of its own: a connection that cannot produce a STUN
+binding with the Session's ICE credentials is dropped, and the Rendezvous
+never holds keys to read what it forwards.
+
 ## What a receiver does with a frame it can't accept
 
 Three outcomes, which `wire.Decode` reports as a `Disposition` on the error:

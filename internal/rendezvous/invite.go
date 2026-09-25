@@ -85,14 +85,21 @@ func (i Invite) String() string {
 
 // SignalURL is the WebSocket address the Peer dials to begin Signaling. It
 // carries no Password, by construction.
-func (i Invite) SignalURL() string {
+func (i Invite) SignalURL() string { return i.wsURL(PathSignal) }
+
+// RelayURL is the WebSocket address the Peer's fallback relay bridge dials.
+// It carries no Password either.
+func (i Invite) RelayURL() string { return i.wsURL(PathRelay) }
+
+// wsURL is the Rendezvous's base URL in WebSocket clothes, with a path.
+func (i Invite) wsURL(path string) string {
 	switch {
 	case strings.HasPrefix(i.URL, "https://"):
-		return "wss://" + strings.TrimPrefix(i.URL, "https://") + PathSignal
+		return "wss://" + strings.TrimPrefix(i.URL, "https://") + path
 	case strings.HasPrefix(i.URL, "http://"):
-		return "ws://" + strings.TrimPrefix(i.URL, "http://") + PathSignal
+		return "ws://" + strings.TrimPrefix(i.URL, "http://") + path
 	}
-	return i.URL + PathSignal
+	return i.URL + path
 }
 
 // ParseInvite reads an Invite a person pasted. It is deliberately forgiving of

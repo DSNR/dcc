@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/DSNR/dcc/internal/identity"
+	"github.com/DSNR/dcc/internal/relay"
 	"github.com/DSNR/dcc/internal/rendezvous"
 	"github.com/DSNR/dcc/internal/signaling"
 	"github.com/DSNR/dcc/internal/transport"
@@ -44,6 +45,10 @@ type Options struct {
 	// ReconnectWait overrides ReconnectBudget; zero means the protocol
 	// value. Tests shorten it.
 	ReconnectWait time.Duration
+	// RelayOnly disables every direct path, leaving the Rendezvous's
+	// fallback relay as the only route. Tests use it to prove the relay
+	// carries a Session alone.
+	RelayOnly bool
 }
 
 // Session is one Session from Invite to disconnect, driven entirely through
@@ -67,13 +72,20 @@ type Session struct {
 	signal   *signaling.Server
 	conn     *signaling.Conn
 	trans    *transport.Transport
-	peer     identity.PublicKey
-	peerName string
-	locked   bool
-	accepted bool
-	up       bool
-	link     transport.Link
-	held     []wire.Frame
+	// relayListener is the Host's side of the fallback relay for the current
+	// transport; bridge is the Peer's. Each attachment mints its own — the
+	// TCPMux inside the old transport dies with it and takes its listener
+	// along.
+	relayListener *relay.Listener
+	bridge        *relay.Bridge
+	relayOnly     bool
+	peer          identity.PublicKey
+	peerName      string
+	locked        bool
+	accepted      bool
+	up            bool
+	link          transport.Link
+	held          []wire.Frame
 
 	// sessionID is the id the Host minted — held by both sides, echoed by
 	// the Peer's re-handshake to claim it is resuming this Session and not
@@ -129,16 +141,17 @@ func New(opts Options) (*Session, error) {
 		budget = ReconnectBudget
 	}
 	return &Session{
-		identity: opts.Identity,
-		name:     opts.Name,
-		cert:     cert,
-		tunnel:   opts.Tunnel,
-		pins:     pins,
-		history:  opts.History,
-		events:   newEventQueue(),
-		budget:   budget,
-		state:    Idle,
-		seen:     make(map[string]bool),
+		identity:  opts.Identity,
+		name:      opts.Name,
+		cert:      cert,
+		tunnel:    opts.Tunnel,
+		pins:      pins,
+		history:   opts.History,
+		events:    newEventQueue(),
+		budget:    budget,
+		relayOnly: opts.RelayOnly,
+		state:     Idle,
+		seen:      make(map[string]bool),
 	}, nil
 }
 
@@ -174,7 +187,21 @@ func (s *Session) Host(ctx context.Context) error {
 		signal.ServeHTTP(w, r)
 	})
 
-	rdv, err := rendezvous.Start(ctx, rendezvous.Options{Tunnel: s.tunnel, Signal: handler})
+	// The relay handler routes to whichever listener belongs to the current
+	// transport — reconnects mint a new one — and refuses while there is
+	// none.
+	relayHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		listener := s.relayListener
+		s.mu.Unlock()
+		if listener == nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		listener.ServeHTTP(w, r)
+	})
+
+	rdv, err := rendezvous.Start(ctx, rendezvous.Options{Tunnel: s.tunnel, Signal: handler, Relay: relayHandler})
 	if err != nil {
 		s.abortStart()
 		return err
@@ -417,13 +444,18 @@ func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiato
 	s.gen++
 	gen := s.gen
 
-	// The Signal callback deliberately reaches past the Session's own lock:
-	// the initiator's Start sends the offer before returning, while this
-	// method still holds it.
-	trans, err := transport.Start(transport.Options{
+	// Each transport gets its own end of the fallback relay: the Host a
+	// fresh listener behind /v1/relay, the Peer a fresh bridge to it. A Peer
+	// whose bridge won't open just has no relay to fall back on — direct
+	// paths still stand.
+	topts := transport.Options{
 		Certificate: s.cert,
 		Remote:      dtls,
 		Initiator:   initiator,
+		RelayOnly:   s.relayOnly,
+		// The Signal callback deliberately reaches past the Session's own
+		// lock: the initiator's Start sends the offer before returning,
+		// while this method still holds it.
 		Signal: func(f wire.Frame) {
 			ctx, cancel := context.WithTimeout(context.Background(), teardownWait)
 			defer cancel()
@@ -432,7 +464,21 @@ func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiato
 		Up:    func(link transport.Link) { s.onTransportUp(gen, link) },
 		Frame: func(f wire.Frame) { s.onData(gen, f) },
 		Down:  func(err error) { s.onTransportDown(gen, err) },
-	})
+	}
+	if s.isHost {
+		s.relayListener = relay.NewListener()
+		topts.RelayListener = s.relayListener
+	} else {
+		if s.bridge != nil {
+			_ = s.bridge.Close()
+		}
+		s.bridge = nil
+		if bridge, err := relay.Open(s.invite.RelayURL()); err == nil {
+			s.bridge = bridge
+			topts.RelayAddr = bridge.Addr()
+		}
+	}
+	trans, err := transport.Start(topts)
 	if err != nil {
 		s.endLocked(Failed, ReasonTransportFailed)
 		return
@@ -640,10 +686,20 @@ func (s *Session) teardownLocked() {
 	}
 	s.queue = nil
 	conn, rdv, trans := s.conn, s.rdv, s.trans
+	listener, bridge := s.relayListener, s.bridge
 	s.conn, s.rdv, s.signal, s.trans = nil, nil, nil, nil
+	s.relayListener, s.bridge = nil, nil
 	go func() {
 		if trans != nil {
 			_ = trans.Close()
+		}
+		// The transport's mux closes the relay listener; closing it here too
+		// covers a listener whose transport never started.
+		if listener != nil {
+			_ = listener.Close()
+		}
+		if bridge != nil {
+			_ = bridge.Close()
 		}
 		if conn != nil {
 			conn.Close()
