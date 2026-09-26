@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"image"
 
 	"github.com/DSNR/dcc/internal/session"
 )
@@ -37,6 +38,14 @@ type Session interface {
 	Mute(muted bool) error
 	// Muted reports whether this side's microphone is being sent.
 	Muted() bool
+	// Camera turns this side's camera on or off. It opens or releases the
+	// device, so it blocks and never runs on the UI's goroutine.
+	Camera(on bool) error
+	// CameraOn reports whether this side's camera is being sent.
+	CameraOn() bool
+	// Frames is the other side's decoded video, newest frame only — what the
+	// video window paints.
+	Frames() <-chan *image.RGBA
 	// Close ends the Session and releases everything it holds.
 	Close() error
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -45,14 +46,19 @@ type Options struct {
 	// Warnings are put in front of the participant at startup — an Identity
 	// that had to be reset, chiefly.
 	Warnings []string
+	// Video opens the window a Call's video is painted in. Nil means this
+	// terminal shows no video — which is what a test wants, and never what a
+	// participant does.
+	Video OpenVideo
 }
 
 // Model is the terminal interface: keystrokes and Session events in, one
 // rendered frame out. It is a bubbletea.Model, which only Run needs to know.
 type Model struct {
-	name    string
-	newSess NewSession
-	store   Store
+	name       string
+	newSess    NewSession
+	store      Store
+	openWindow OpenVideo
 
 	// sess is the running Session, nil when there is none. Only the events
 	// channel closing clears it, so that a Session is released exactly once,
@@ -67,11 +73,15 @@ type Model struct {
 	// prompt is the standing Security Code prompt, nil when none stands.
 	prompt *session.VerifyPrompt
 
-	// call is where the Call inside the Session stands, and remoteMic is
-	// what the other side last said about their microphone. Both are only
-	// meaningful while a Call is running.
+	// call is where the Call inside the Session stands, and remoteMic and
+	// remoteCam are what the other side last said about their microphone and
+	// camera. All three are only meaningful while a Call is running.
 	call      session.CallState
 	remoteMic bool
+	remoteCam bool
+	// video is the video window, open exactly while a Call is Active. It is
+	// a separate desktop window so that the terminal stays a terminal.
+	video VideoWindow
 
 	// log is everything that has happened, in order; index finds the entry a
 	// delivery status belongs to.
@@ -114,15 +124,16 @@ func New(opts Options) Model {
 	}
 
 	m := Model{
-		name:    opts.Name,
-		newSess: opts.New,
-		store:   opts.Store,
-		state:   session.Idle,
-		index:   make(map[string]int),
-		view:    view,
-		input:   input,
-		width:   defaultWidth,
-		height:  defaultHeight,
+		name:       opts.Name,
+		newSess:    opts.New,
+		store:      opts.Store,
+		openWindow: opts.Video,
+		state:      session.Idle,
+		index:      make(map[string]int),
+		view:       view,
+		input:      input,
+		width:      defaultWidth,
+		height:     defaultHeight,
 	}
 	m.add(notice(welcome))
 	for _, warning := range opts.Warnings {
@@ -151,8 +162,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A released Session's last words, after the UI moved on.
 			return m, nil
 		}
-		m.apply(msg.event)
-		return m, waitEvent(msg.from)
+		return m, tea.Batch(m.apply(msg.event), waitEvent(msg.from))
 
 	case overMsg:
 		if msg.from != m.sess {
@@ -163,6 +173,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case noticeMsg:
 		m.add(notice(msg.text))
+		return m, nil
+
+	case videoGoneMsg:
+		if m.video == nil {
+			// The UI closed it, with the Call. Nothing to say.
+			return m, nil
+		}
+		m.video = nil
+		m.add(notice("The video window is closed. The Call carries on — /hangup ends it."))
 		return m, nil
 
 	case closedMsg:
@@ -234,6 +253,8 @@ func (m Model) submit(line string) (tea.Model, tea.Cmd) {
 		return m.setMuted(true)
 	case unmute:
 		return m.setMuted(false)
+	case camera:
+		return m.setCamera(c.arg)
 	case text:
 		return m.send(c.arg)
 	case unknown:
@@ -424,6 +445,27 @@ func (m Model) setMuted(muted bool) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// setCamera turns this side's camera on or off. Opening a camera takes a
+// moment, so it happens off the UI's goroutine — a terminal that stopped
+// redrawing while a webcam woke up would look broken.
+func (m Model) setCamera(arg string) (tea.Model, tea.Cmd) {
+	var on bool
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "on":
+		on = true
+	case "off":
+		on = false
+	default:
+		m.add(notice("/camera on — or /camera off."))
+		return m, nil
+	}
+	if m.sess == nil || m.call == session.NoCall {
+		m.add(notice("There is no Call to turn a camera on in."))
+		return m, nil
+	}
+	return m, cameraCmd(m.sess, on)
+}
+
 // disconnect ends the Session but stays in the app, so that the conversation
 // can be read back and another Invite made.
 func (m Model) disconnect() (tea.Model, tea.Cmd) {
@@ -451,8 +493,10 @@ func (m Model) quit() (tea.Model, tea.Cmd) {
 	return m, closeCmd(m.sess)
 }
 
-// apply folds one Session event into what is on screen.
-func (m *Model) apply(e session.Event) {
+// apply folds one Session event into what is on screen, and returns whatever
+// work that leaves — opening the video window, chiefly, which has something
+// to report back.
+func (m *Model) apply(e session.Event) tea.Cmd {
 	switch e := e.(type) {
 	case session.StateChanged:
 		m.state, m.reason = e.State, e.Reason
@@ -487,17 +531,33 @@ func (m *Model) apply(e session.Event) {
 
 	case session.CallChanged:
 		m.call = e.State
-		// A Call starts with both microphones live; the other side's own
-		// media state follows and corrects this if it does not.
+		// A Call starts with both microphones live and both cameras off; the
+		// other side's own media state follows and corrects this if it does
+		// not.
 		m.remoteMic = e.State == session.Active
+		m.remoteCam = false
 		if said := callNotice(e, m.peerName()); said != "" {
 			m.add(notice(said))
+		}
+		switch e.State {
+		case session.Active:
+			// The video window opens with the Call, whether or not anyone has
+			// a camera on yet: it is where the Call's video goes, and a
+			// window that appeared halfway through would steal focus from the
+			// terminal at the worst moment.
+			return m.openVideo()
+		case session.NoCall:
+			m.closeVideo()
 		}
 
 	case session.MediaChanged:
 		if m.remoteMic != e.Mic {
 			m.remoteMic = e.Mic
 			m.add(notice(micNotice(e.Mic, m.peerName())))
+		}
+		if m.remoteCam != e.Cam {
+			m.remoteCam = e.Cam
+			m.add(notice(camNotice(e.Cam, m.peerName())))
 		}
 
 	case session.TextStatus:
@@ -506,16 +566,53 @@ func (m *Model) apply(e session.Event) {
 			m.syncView()
 		}
 	}
+	return nil
+}
+
+// openVideo puts the Call's video on the screen. The window paints the frames
+// the Session decodes and closes with the Call; a window that cannot be opened
+// at all — no display, no GPU — is said out loud and the Call carries on
+// without it.
+func (m *Model) openVideo() tea.Cmd {
+	if m.video != nil || m.sess == nil || m.openWindow == nil {
+		return nil
+	}
+	failed := make(chan error, 1)
+	m.video = m.openWindow(VideoOptions{
+		Title:  "dcc — " + m.peerName(),
+		Frames: m.sess.Frames(),
+		Failed: func(err error) {
+			select {
+			case failed <- err:
+			default:
+			}
+		},
+	})
+	if m.video == nil {
+		return nil
+	}
+	return waitVideo(m.video, failed)
+}
+
+// closeVideo takes the video window down, which is what the end of a Call
+// does to it.
+func (m *Model) closeVideo() {
+	if m.video == nil {
+		return
+	}
+	m.video.Close()
+	m.video = nil
 }
 
 // released is the Session's events channel closing: it is over for good,
 // whatever ended it.
 func (m *Model) released() {
+	m.closeVideo()
 	m.sess = nil
 	m.prompt = nil
 	m.link = 0
 	m.call = session.NoCall
-	m.remoteMic = false
+	m.remoteMic, m.remoteCam = false, false
 	m.layout()
 	if m.state == session.Idle {
 		// It never got going — a refused Invite string, say. Whatever
@@ -585,6 +682,9 @@ type (
 	overMsg struct{ from Session }
 	// noticeMsg is something a command run off the UI's goroutine has to say.
 	noticeMsg struct{ text string }
+	// videoGoneMsg is the video window closing — by the participant clicking
+	// its close box, or because the Call ended and the UI closed it.
+	videoGoneMsg struct{}
 	// closedMsg is the final teardown finishing, which is when the app may
 	// actually exit.
 	closedMsg struct{}
@@ -624,6 +724,34 @@ func joinCmd(s Session, invite string) tea.Cmd {
 			return noticeMsg{text: "Could not connect: " + err.Error()}
 		}
 		return nil
+	}
+}
+
+// cameraCmd turns the camera on or off and says what came of it. It runs off
+// the UI's goroutine because opening a device is not instant.
+func cameraCmd(s Session, on bool) tea.Cmd {
+	return func() tea.Msg {
+		if err := s.Camera(on); err != nil {
+			return noticeMsg{text: "Camera: " + err.Error()}
+		}
+		if on {
+			return noticeMsg{text: "Camera on — they can see you."}
+		}
+		return noticeMsg{text: "Camera off — the device is released."}
+	}
+}
+
+// waitVideo watches one video window: it reports a window that could not be
+// opened, and reports the window going away — which may be the participant
+// closing it mid-Call, and is the UI's cue to stop thinking it still has one.
+func waitVideo(w VideoWindow, failed <-chan error) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case err := <-failed:
+			return noticeMsg{text: "The video window could not be opened: " + err.Error()}
+		case <-w.Closed():
+			return videoGoneMsg{}
+		}
 	}
 }
 

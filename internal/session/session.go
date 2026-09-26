@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"net/http"
 	"sync"
 	"time"
@@ -123,17 +124,24 @@ type Session struct {
 	reconnectTimer *time.Timer
 
 	// The Call inside this Session, of which there is at most one. callID is
-	// empty exactly when callState is NoCall; audio is the open devices,
-	// held only while the Call is Active.
+	// empty exactly when callState is NoCall; audio and video are the open
+	// pipelines, held only while the Call is Active.
 	callState CallState
 	callID    string
 	ringTimer *time.Timer
 	audio     *media.Audio
+	video     *media.Video
 	muted     bool
-	// noMic records that this machine's microphone could not be opened, so
-	// that unmuting one that does not exist is refused rather than
-	// announced.
+	cam       bool
+	// noMic and noCam record that this machine's microphone or camera could
+	// not be opened, so that turning on one that does not exist is refused
+	// rather than announced.
 	noMic bool
+	noCam bool
+	// frames carries the other side's decoded video to the UI, newest frame
+	// only. It is not an Event: fifteen pictures a second do not belong in a
+	// queue that promises to deliver everything in order.
+	frames chan *image.RGBA
 	// remoteMedia is the other side's last announced stream state, held so
 	// that one that arrives before this side is Active is not lost.
 	remoteMedia     MediaChanged
@@ -184,6 +192,7 @@ func New(opts Options) (*Session, error) {
 		relayOnly: opts.RelayOnly,
 		state:     Idle,
 		seen:      make(map[string]bool),
+		frames:    make(chan *image.RGBA, 1),
 	}, nil
 }
 
@@ -493,11 +502,13 @@ func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiato
 			defer cancel()
 			_ = conn.Send(ctx, f)
 		},
-		Up:      func(link transport.Link) { s.onTransportUp(gen, link) },
-		Frame:   func(f wire.Frame) { s.onData(gen, f) },
-		Down:    func(err error) { s.onTransportDown(gen, err) },
-		Audio:   func(payload []byte) { s.onAudio(gen, payload) },
-		MediaUp: func() { s.onMediaUp(gen) },
+		Up:             func(link transport.Link) { s.onTransportUp(gen, link) },
+		Frame:          func(f wire.Frame) { s.onData(gen, f) },
+		Down:           func(err error) { s.onTransportDown(gen, err) },
+		Audio:          func(payload []byte) { s.onAudio(gen, payload) },
+		Video:          func(frame []byte) { s.onVideo(gen, frame) },
+		KeyframeWanted: func() { s.onKeyframeWanted(gen) },
+		MediaUp:        func() { s.onMediaUp(gen) },
 	}
 	if s.isHost {
 		s.relayListener = relay.NewListener()

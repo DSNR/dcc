@@ -7,21 +7,22 @@ import (
 	"github.com/jfreymuth/pulse"
 )
 
-// System is PulseAudio, which every desktop Linux runs — directly, or as
-// PipeWire's Pulse server. There is no ALSA path: dcc wants a mixer and a
-// device that other applications can share, which is what a sound server is
-// for.
-func System() Devices { return pulseDevices{} }
+// System on Linux is PulseAudio for sound and V4L2 for the camera.
+// PulseAudio is what every desktop Linux runs — directly, or as PipeWire's
+// Pulse server. There is no ALSA path: dcc wants a mixer and a device that
+// other applications can share, which is what a sound server is for. The
+// camera side is in camera_linux.go.
+func System() Devices { return linuxDevices{} }
 
-// pulseDevices opens one PulseAudio client per stream. A client is a socket
-// and a goroutine, and tying its life to the stream's means closing the
-// stream closes everything it holds.
-type pulseDevices struct{}
+// linuxDevices opens one PulseAudio client per audio stream. A client is a
+// socket and a goroutine, and tying its life to the stream's means closing
+// the stream closes everything it holds.
+type linuxDevices struct{}
 
 // Capture opens the default source as mono at SampleRate. PulseAudio
 // resamples and downmixes on its side, so the pipeline never sees the
 // hardware's real shape.
-func (pulseDevices) Capture() (Source, error) {
+func (linuxDevices) Capture() (Source, error) {
 	client, err := pulse.NewClient(pulse.ClientApplicationName("dcc"))
 	if err != nil {
 		return nil, fmt.Errorf("media: connecting to PulseAudio: %w", err)
@@ -45,7 +46,7 @@ func (pulseDevices) Capture() (Source, error) {
 }
 
 // Playback opens the default sink in the same shape.
-func (pulseDevices) Playback() (Sink, error) {
+func (linuxDevices) Playback() (Sink, error) {
 	client, err := pulse.NewClient(pulse.ClientApplicationName("dcc"))
 	if err != nil {
 		return nil, fmt.Errorf("media: connecting to PulseAudio: %w", err)

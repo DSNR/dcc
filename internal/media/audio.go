@@ -40,13 +40,18 @@ type Sink interface {
 }
 
 // Devices is the media-device boundary — the one place the operating
-// system's sound card enters dcc. System() returns the real one; tests pass
-// a Fake, which is what lets a Call be exercised end to end without one.
+// system's sound card and camera enter dcc. System() returns the real ones;
+// tests pass a Fake, which is what lets a Call be exercised end to end
+// without either.
 type Devices interface {
 	// Capture opens the default microphone.
 	Capture() (Source, error)
 	// Playback opens the default speaker.
 	Playback() (Sink, error)
+	// Camera opens the default camera. It is called when someone turns their
+	// camera on, never before: a Call that stays audio-only never touches
+	// the device.
+	Camera() (Camera, error)
 }
 
 // ErrNoDevices reports that this build has no driver for the platform it is

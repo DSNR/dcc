@@ -104,8 +104,9 @@ type CallChanged struct {
 
 func (CallChanged) event() {}
 
-// MediaChanged is the other side's stream state, as they last announced it.
-// It arrives only while a Call is Active.
+// MediaChanged is the other side's stream state, as they last announced it —
+// which of their microphone, camera and screen share are live. It arrives
+// only while a Call is Active.
 type MediaChanged struct {
 	Mic, Cam, Screen bool
 }
@@ -300,7 +301,8 @@ func (s *Session) onMediaUp(gen int) {
 // openDevices opens the microphone and speaker for an Active Call — not
 // before, so that a Session only ever used for text never touches the sound
 // card, and off the Session's lock, so that every other command is not made
-// to wait on one.
+// to wait on one. The video pipeline is built alongside them and opens no
+// camera until somebody turns one on.
 func (s *Session) openDevices(gen int, muted bool) {
 	audio, err := media.StartAudio(media.AudioOptions{
 		Devices: s.devices,
@@ -326,6 +328,7 @@ func (s *Session) openDevices(gen int, muted bool) {
 		// Muting while the devices were opening still counts.
 		audio.Mute(s.muted)
 	}
+	s.startVideoLocked(gen)
 	s.announceMediaLocked()
 }
 
@@ -358,13 +361,13 @@ func (s *Session) onAudio(gen int, payload []byte) {
 }
 
 // announceMediaLocked tells the other side which of this side's streams are
-// live. Camera and screen are always off until the work that turns them on
-// lands, and saying so explicitly is what the protocol asks for.
+// live. Screen is always off until the work that shares one lands, and saying
+// so explicitly is what the protocol asks for.
 func (s *Session) announceMediaLocked() {
 	if s.callState != Active || s.trans == nil {
 		return
 	}
-	_ = s.trans.Send(wire.Media{Mic: !s.muted})
+	_ = s.trans.Send(wire.Media{Mic: !s.muted, Cam: s.cam})
 }
 
 // ringLocked starts the ring timeout, which both sides run.
@@ -402,21 +405,28 @@ func (s *Session) setCallLocked(state CallState, reason CallReason) {
 	s.events.emit(CallChanged{State: state, CallID: s.callID, Reason: reason})
 }
 
-// endCallLocked returns the Session to text: the ring stops, the devices are
-// released, and the Call's id is forgotten so a straggling frame for it is
-// discarded. Closing the audio waits for its capture goroutine, which takes
-// the Session's lock, so it happens off this one.
+// endCallLocked returns the Session to text: the ring stops, the devices —
+// microphone, speaker and camera — are released, and the Call's id is
+// forgotten so a straggling frame for it is discarded. Closing the audio
+// waits for its capture goroutine, which takes the Session's lock, so it
+// happens off this one.
 func (s *Session) endCallLocked(reason CallReason) {
 	if s.callState == NoCall {
 		return
 	}
 	s.stopRingLocked()
-	audio := s.audio
-	s.audio = nil
+	audio, video := s.audio, s.video
+	s.audio, s.video = nil, nil
 	s.muted, s.noMic = false, false
+	s.cam, s.noCam = false, false
 	s.remoteMedia, s.haveRemoteMedia = MediaChanged{}, false
 	if audio != nil {
 		go func() { _ = audio.Close() }()
+	}
+	// Closing the video releases the camera and waits for its capture
+	// goroutine, which is why it too happens off this lock.
+	if video != nil {
+		go func() { _ = video.Close() }()
 	}
 	s.setCallLocked(NoCall, reason)
 	s.callID = ""

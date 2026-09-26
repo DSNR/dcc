@@ -2,6 +2,8 @@ package media
 
 import (
 	"errors"
+	"image"
+	"image/color"
 	"math"
 	"sync"
 	"time"
@@ -11,15 +13,25 @@ import (
 // otherwise — A above middle C, well inside a telephone band.
 const ToneFrequency = 440.0
 
+// TestPatternTint is the colour a Fake camera paints when it is not told
+// otherwise: a mid green, far enough from grey that a lossy codec cannot
+// lose it.
+var TestPatternTint = color.RGBA{R: 40, G: 180, B: 60, A: 0xFF}
+
 // Fake is the media-device boundary made of software: a tone generator where
-// the microphone would be, a recorder where the speaker would be. It is what
-// lets a Call be driven end to end — rung, answered, heard, muted, hung up —
-// with no sound card anywhere in the test.
+// the microphone would be, a recorder where the speaker would be, and a test
+// pattern where the camera would be. It is what lets a Call be driven end to
+// end — rung, answered, heard, seen, muted, hung up — with no sound card or
+// webcam anywhere in the test.
 type Fake struct {
 	// Tone is the frequency the fake microphone hums, in hertz. Zero means
 	// ToneFrequency. Giving the two sides of a test different tones is what
 	// makes "I heard them, not myself" a thing a test can assert.
-	Tone  float64
+	Tone float64
+	// Tint is the colour the fake camera's test pattern is painted in. Zero
+	// means TestPatternTint. It is the video half of the same trick: two
+	// sides with different tints make "I am seeing them" assertable.
+	Tint  color.RGBA
 	mu    sync.Mutex
 	heard *Recorder
 }
@@ -47,6 +59,64 @@ func (f *Fake) Capture() (Source, error) {
 
 // Playback opens the fake speaker.
 func (f *Fake) Playback() (Sink, error) { return f.Heard(), nil }
+
+// Camera opens the fake camera.
+func (f *Fake) Camera() (Camera, error) {
+	tint := f.Tint
+	if tint == (color.RGBA{}) {
+		tint = TestPatternTint
+	}
+	return &pattern{
+		tint: tint,
+		pic:  NewPicture(VideoWidth, VideoHeight),
+		done: make(chan struct{}),
+		next: time.Now(),
+	}, nil
+}
+
+// pattern is a fake camera: a flat tint with a bar sweeping across it,
+// delivered in real time one frame every VideoFrameDuration. The tint is what
+// a test recognises the sender by; the bar is what makes every frame differ
+// from the last, so the encoder produces inter frames rather than an endless
+// run of identical ones.
+type pattern struct {
+	tint  color.RGBA
+	pic   Picture
+	frame int
+	next  time.Time
+	done  chan struct{}
+	once  sync.Once
+}
+
+// Read paints the next frame, sleeping until it is due.
+func (p *pattern) Read() (Picture, error) {
+	p.next = p.next.Add(VideoFrameDuration)
+	select {
+	case <-time.After(time.Until(p.next)):
+	case <-p.done:
+		return Picture{}, errors.New("media: the fake camera is closed")
+	}
+	p.pic.fill(p.tint)
+	// The bar is a sixteenth of the frame wide and takes sixteen frames to
+	// cross it, in luma only — a white stripe over whatever the tint is.
+	width := p.pic.Width / 16
+	start := (p.frame % 16) * width
+	for row := range p.pic.Height {
+		line := p.pic.Y[row*p.pic.YStride:]
+		for i := start; i < start+width && i < p.pic.Width; i++ {
+			line[i] = 235
+		}
+	}
+	p.frame++
+	return p.pic, nil
+}
+
+// Close stops the pattern, unblocking a Read that is waiting for the next
+// frame.
+func (p *pattern) Close() error {
+	p.once.Do(func() { close(p.done) })
+	return nil
+}
 
 // tone is a fake microphone: a sine wave delivered in real time, one frame
 // every FrameDuration, because the capture loop is paced by its microphone
@@ -113,6 +183,37 @@ func (r *Recorder) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.samples = nil
+}
+
+// TintTolerance is how far a channel may drift and still count as the colour
+// that was sent. VP8 at a Call's bitrate does not return a flat colour
+// exactly, so nothing that looks at a decoded picture can ask for exactness.
+const TintTolerance = 40
+
+// Tinted is the share of a picture within TintTolerance of a colour — the
+// video counterpart of Recorder.Power, and for the same reason: it turns
+// "their camera arrived" into something a test can assert without eyes. Two
+// Fakes with different tints make "I am seeing them, not myself" assertable.
+func Tinted(img *image.RGBA, want color.RGBA) float64 {
+	near := 0
+	for i := 0; i+3 < len(img.Pix); i += 4 {
+		if channelNear(img.Pix[i], want.R) &&
+			channelNear(img.Pix[i+1], want.G) &&
+			channelNear(img.Pix[i+2], want.B) {
+			near++
+		}
+	}
+	bounds := img.Bounds()
+	if bounds.Empty() {
+		return 0
+	}
+	return float64(near) / float64(bounds.Dx()*bounds.Dy())
+}
+
+// channelNear is one colour channel within TintTolerance of another.
+func channelNear(got, want byte) bool {
+	d := int(got) - int(want)
+	return d <= TintTolerance && d >= -TintTolerance
 }
 
 // Power is how much of what was heard is at freq, by Goertzel's filter,

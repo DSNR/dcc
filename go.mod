@@ -3,6 +3,8 @@ module github.com/DSNR/dcc
 go 1.27.1
 
 require (
+	gioui.org v0.10.2
+	github.com/blackjack/webcam v0.6.1
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -16,13 +18,17 @@ require (
 	github.com/muesli/termenv v0.16.0
 	github.com/pion/ice/v4 v4.4.2
 	github.com/pion/interceptor v0.1.48
+	github.com/pion/rtcp v1.2.17
+	github.com/pion/rtp v1.10.5
 	github.com/pion/webrtc/v4 v4.2.20
+	github.com/thesyncim/govpx v0.0.0-20260716224042-691cd0512c48
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.59.0
 )
 
 require (
+	gioui.org/shader v1.0.9 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
@@ -33,6 +39,7 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
+	github.com/go-text/typesetting v0.3.4 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
@@ -45,8 +52,6 @@ require (
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/mdns/v2 v2.2.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/rtcp v1.2.17 // indirect
-	github.com/pion/rtp v1.10.5 // indirect
 	github.com/pion/sctp v1.11.1 // indirect
 	github.com/pion/sdp/v3 v3.0.19 // indirect
 	github.com/pion/srtp/v3 v3.0.13 // indirect
@@ -57,6 +62,8 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	golang.org/x/exp/shiny v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
+	golang.org/x/image v0.26.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.14.0 // indirect

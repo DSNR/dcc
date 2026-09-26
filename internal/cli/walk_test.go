@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"image/color"
 	"regexp"
 	"testing"
 
@@ -61,12 +62,12 @@ func TestTwoTerminalsChat(t *testing.T) {
 
 // TestTwoTerminalsCall is the Call end to end, again through nothing but the
 // two terminal interfaces: rung, answered, heard — each side hearing the
-// other's tone and not its own — muted, and hung up back to text.
+// other's tone and not its own — seen, muted, and hung up back to text.
 func TestTwoTerminalsCall(t *testing.T) {
-	hostDevices := &media.Fake{Tone: 440}
+	hostDevices := &media.Fake{Tone: 440, Tint: walkTint}
 	peerDevices := &media.Fake{Tone: 1100}
-	host := terminal(t, "alice", hostDevices)
-	peer := terminal(t, "bob", peerDevices)
+	host, _ := terminalWithVideo(t, "alice", hostDevices)
+	peer, peerWindows := terminalWithVideo(t, "bob", peerDevices)
 	link(host, peer)
 
 	host.submit("/invite")
@@ -90,6 +91,26 @@ func TestTwoTerminalsCall(t *testing.T) {
 	host.until("the peer's tone", func() bool { return tone(hostDevices, 1100) })
 	peer.until("the host's tone", func() bool { return tone(peerDevices, 440) })
 
+	// The video window is up for as long as the Call is.
+	peer.until("the video window to open", func() bool {
+		opened, _ := peerWindows.counts()
+		return opened == 1
+	})
+
+	// And the Host's camera reaches it: the picture the window is being shown
+	// is the tint the Host's camera paints, not the one the Peer's does.
+	host.submit("/camera on")
+	peer.mustSee(`"alice" turned their camera on`)
+	host.mustSee("Camera on")
+	peer.until("the Host's camera in the window", func() bool {
+		select {
+		case img := <-peerWindows.frames():
+			return img != nil && media.Tinted(img, walkTint) > 0.7
+		default:
+			return false
+		}
+	})
+
 	host.submit("/mute")
 	peer.mustSee(`"alice" muted their microphone`)
 	host.mustSee("muted")
@@ -97,6 +118,10 @@ func TestTwoTerminalsCall(t *testing.T) {
 	host.submit("/hangup")
 	host.mustSee("The Call ended")
 	peer.mustSee("The Call ended")
+	peer.until("the video window to close", func() bool {
+		_, closed := peerWindows.counts()
+		return closed == 1
+	})
 
 	// Text carries on over the same Session.
 	peer.submit("still here")
@@ -108,10 +133,22 @@ func tone(f *media.Fake, freq float64) bool {
 	return f.Heard().Power(freq) > 4*f.Heard().Power(freq*2.3)
 }
 
+// walkTint is the colour the Host's fake camera paints, which is how the Peer's
+// video window can be told to be showing the Host and not itself.
+var walkTint = color.RGBA{R: 200, G: 40, B: 40, A: 0xFF}
+
 // terminal is one dcc-cli, wired to real Sessions over a loopback Rendezvous:
 // real Identity, real Noise handshake, real pion, no cloudflared. Calls run
 // on fake devices, so a Call can be heard in a test with no sound card.
 func terminal(t *testing.T, name string, devices ...media.Devices) *harness {
+	t.Helper()
+	h, _ := terminalWithVideo(t, name, devices...)
+	return h
+}
+
+// terminalWithVideo is terminal, handing back the video windows it opened so a
+// test can see what was put in front of the person.
+func terminalWithVideo(t *testing.T, name string, devices ...media.Devices) (*harness, *fakeWindow) {
 	t.Helper()
 	var audio media.Devices
 	if len(devices) > 0 {
@@ -131,8 +168,10 @@ func terminal(t *testing.T, name string, devices ...media.Devices) *harness {
 			_ = s.Close()
 		}
 	})
+	windows := newWindows()
 	return newHarness(t, cli.Options{
-		Name: name,
+		Name:  name,
+		Video: windows.open,
 		New: func() (cli.Session, error) {
 			s, err := session.New(session.Options{
 				Identity: id,
@@ -146,5 +185,5 @@ func terminal(t *testing.T, name string, devices ...media.Devices) *harness {
 			live = append(live, s)
 			return s, nil
 		},
-	})
+	}), windows
 }

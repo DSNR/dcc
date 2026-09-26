@@ -3,6 +3,7 @@ package cli_test
 import (
 	"context"
 	"fmt"
+	"image"
 	"os"
 	"strings"
 	"sync"
@@ -70,14 +71,20 @@ type fakeSession struct {
 	hangups int
 	mutes   []bool
 	muted   bool
+	cameras []bool
+	cam     bool
+	frames  chan *image.RGBA
 
-	// hostErr, joinErr, sendErr and callErr are what the next matching
-	// command returns; zero means it succeeds.
-	hostErr, joinErr, sendErr, callErr error
+	// hostErr, joinErr, sendErr, callErr and cameraErr are what the next
+	// matching command returns; zero means it succeeds.
+	hostErr, joinErr, sendErr, callErr, cameraErr error
 }
 
 func newFake() *fakeSession {
-	return &fakeSession{events: make(chan session.Event, 64)}
+	return &fakeSession{
+		events: make(chan session.Event, 64),
+		frames: make(chan *image.RGBA, 1),
+	}
 }
 
 func (f *fakeSession) Events() <-chan session.Event { return f.events }
@@ -165,6 +172,32 @@ func (f *fakeSession) Muted() bool {
 	return f.muted
 }
 
+func (f *fakeSession) Camera(on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cameraErr != nil {
+		return f.cameraErr
+	}
+	f.cameras = append(f.cameras, on)
+	f.cam = on
+	return nil
+}
+
+func (f *fakeSession) CameraOn() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cam
+}
+
+func (f *fakeSession) Frames() <-chan *image.RGBA { return f.frames }
+
+// cameraCalls is what the TUI asked of the camera.
+func (f *fakeSession) cameraCalls() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.cameras...)
+}
+
 // callCounts is what the TUI asked of the Call controls.
 func (f *fakeSession) callCounts() (calls, answers, rejects, hangups int) {
 	f.mu.Lock()
@@ -205,6 +238,69 @@ func (f *fakeSession) texts() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.sent...)
+}
+
+// fakeWindow stands in for the video window, so that a test can watch one
+// open and close without a window appearing on anybody's screen — and without
+// this package depending on a GUI toolkit at all.
+type fakeWindow struct {
+	mu     sync.Mutex
+	opened []cli.VideoOptions
+	closes int
+	done   chan struct{}
+}
+
+func newWindows() *fakeWindow {
+	return &fakeWindow{done: make(chan struct{})}
+}
+
+// open is the OpenVideo the Model is given.
+func (w *fakeWindow) open(opts cli.VideoOptions) cli.VideoWindow {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.opened = append(w.opened, opts)
+	return w
+}
+
+func (w *fakeWindow) Close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closes++
+	select {
+	case <-w.done:
+	default:
+		close(w.done)
+	}
+}
+
+func (w *fakeWindow) Closed() <-chan struct{} { return w.done }
+
+// counts is how many windows were opened and how many closed.
+func (w *fakeWindow) counts() (opened, closed int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.opened), w.closes
+}
+
+// frames is the video channel the window was opened over, which is what a
+// test reads to see what the window is being shown.
+func (w *fakeWindow) frames() <-chan *image.RGBA {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.opened) == 0 {
+		return nil
+	}
+	return w.opened[len(w.opened)-1].Frames
+}
+
+// title is the title the window was opened with.
+func (w *fakeWindow) title() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.opened) == 0 {
+		return ""
+	}
+	return w.opened[len(w.opened)-1].Title
 }
 
 // oneSession hands the TUI the same fake every time it asks for a Session.
@@ -379,9 +475,20 @@ func (h *harness) quitting() bool {
 // connected drives a harness all the way to Connected as the Peer, which is
 // where most of the interesting behaviour lives.
 func connected(t *testing.T) (*harness, *fakeSession) {
+	h, f, _ := connectedWithVideo(t, nil)
+	return h, f
+}
+
+// connectedWithVideo is connected with a say in where a Call's video window
+// comes from.
+func connectedWithVideo(t *testing.T, video cli.OpenVideo) (*harness, *fakeSession, *fakeWindow) {
 	t.Helper()
 	f := newFake()
-	h := newHarness(t, cli.Options{Name: "scott", New: oneSession(f)})
+	windows := newWindows()
+	if video == nil {
+		video = windows.open
+	}
+	h := newHarness(t, cli.Options{Name: "scott", New: oneSession(f), Video: video})
 
 	h.submit("/connect " + testInvite)
 	h.until("the Session to be joined", func() bool {
@@ -398,5 +505,5 @@ func connected(t *testing.T) (*harness, *fakeSession) {
 	f.emit(session.StateChanged{State: session.Connected})
 	f.emit(session.LinkChanged{Link: transport.LinkDirect})
 	h.mustSee("Connected")
-	return h, f
+	return h, f, windows
 }

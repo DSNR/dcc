@@ -35,6 +35,8 @@ const (
 	// mute, unmute: the microphone, which only a Call has.
 	mute
 	unmute
+	// camera: the camera, which only a Call has. arg is "on" or "off".
+	camera
 	// unknown: a slash command that is not one. arg is what was typed.
 	unknown
 )
@@ -84,6 +86,7 @@ var commands = map[string]kind{
 	"hangup":       hangUp,
 	"mute":         mute,
 	"unmute":       unmute,
+	"camera":       camera,
 }
 
 // answers maps the bare words that resolve a standing Security Code prompt.

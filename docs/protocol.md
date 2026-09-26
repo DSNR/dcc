@@ -162,6 +162,21 @@ frames**; ADR 0004 records why it is not Opus. A received RTP packet with an
 empty payload is padding, and is skipped rather than decoded: it carries no
 audio, and playing it would be a frame of silence nobody sent.
 
+Video is **VP8 — RTP payload type 96, 90 kHz clock**, on two tracks named
+`cam` and `screen` within the `dcc` stream, which is how each side tells the
+other's camera from the other's screen share without renegotiating. Each frame
+is packetized per **RFC 7741** at an MTU of 1200 bytes, every payload carrying
+a 15-bit PictureID and the last one of a frame carrying the marker bit. A
+receiver reassembles by marker bit and drops a frame whole when the sequence
+numbers show a fragment missing — half a VP8 frame is not a picture.
+
+A receiver that cannot decode — it joined after the last keyframe, or lost the
+one it needed — sends an **RTCP PLI**, at most once a second; the sender
+answers by forcing its encoder's next frame to be a keyframe. That is the only
+way back from a broken video stream, so the video codec is offered with
+`nack` and `nack pli` feedback rather than leaving either to be assumed: two
+dcc installs would manage without the SDP saying so, a browser would not.
+
 A Call does not survive a reconnect. The media path is rebuilt from nothing,
 and reviving a Call silently across a gap is worse than ringing again. An
 unanswered Call rings for **60 seconds**; both sides count it, so a lost

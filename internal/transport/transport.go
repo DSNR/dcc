@@ -84,6 +84,13 @@ type Options struct {
 	// Audio delivers each received audio frame's encoded payload, in the
 	// codec the media package defines. Nil means a Call is heard by nobody.
 	Audio func(payload []byte)
+	// Video delivers each received camera frame, reassembled from its RTP
+	// payloads. Nil means a Call is watched by nobody.
+	Video func(frame []byte)
+	// KeyframeWanted fires when the other side asks for a keyframe — it
+	// cannot decode what this side is sending. Nil means such a stream stays
+	// broken until the encoder's own next keyframe.
+	KeyframeWanted func()
 	// MediaUp fires when the Call's transceivers are in place: once when
 	// they are first negotiated, and again for each later StartMedia that
 	// finds them already there. It is deliberately not tied to the first
@@ -136,8 +143,20 @@ type Transport struct {
 	// so that both sides asking for it — and an offer that asks for it on
 	// their behalf — add the transceivers exactly once.
 	mediaStarted bool
-	// audio is the local microphone track, nil until media is negotiated.
-	audio *webrtc.TrackLocalStaticSample
+	// audio is the local microphone track, nil until media is negotiated;
+	// camera and screen are the video tracks alongside it.
+	audio  *webrtc.TrackLocalStaticSample
+	camera *webrtc.TrackLocalStaticRTP
+	screen *webrtc.TrackLocalStaticRTP
+	// The camera stream's RTP state, which belongs to the stream rather than
+	// to any one frame: the sequence number and timestamp every packet
+	// carries, and the PictureID each frame is stamped with.
+	videoSeq  uint16
+	videoTime uint32
+	pictureID uint16
+	// remoteVideo is the SSRC of the other side's camera stream, which is
+	// what a PLI has to name. Zero until their first video packet arrives.
+	remoteVideo webrtc.SSRC
 	// mediaUp reports that the Call's transceivers are negotiated. It claims
 	// the one MediaUp that the negotiation itself fires, and is what lets a
 	// later StartMedia answer immediately.

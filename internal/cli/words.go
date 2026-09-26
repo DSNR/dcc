@@ -16,8 +16,7 @@ const welcome = "dcc — end-to-end encrypted chat, peer to peer. Type /help to 
 const hint = " enter sends · alt+enter new line · pgup/pgdn scroll back · /help · ctrl+c quit"
 
 // helpLines is what /help says. The commands are the ones docs/mvp.md names;
-// the ones that need a camera arrive with the work that gives them something
-// to do.
+// the ones that need a screen to share arrive with the work that shares one.
 var helpLines = []string{
 	"Commands:",
 	"  /invite               open a Rendezvous and print an Invite to hand over",
@@ -26,6 +25,7 @@ var helpLines = []string{
 	"  /call                 ring the other person",
 	"  /answer  /reject      pick up or turn down a Call ringing here",
 	"  /mute    /unmute      stop or resume sending your microphone",
+	"  /camera on|off        turn your camera on or off during a Call",
 	"  /hangup               end the Call, stay connected for text",
 	"  /history [name]       read a stored Conversation, no connection needed",
 	"  /clearhistory <name>  delete a Conversation from this device only",
@@ -109,7 +109,7 @@ func callNotice(e session.CallChanged, peer string) string {
 	case session.Negotiating:
 		return "Setting the Call up…"
 	case session.Active:
-		return "In a Call — /mute to stop sending your microphone, /hangup to end it."
+		return "In a Call — video is in its own window. /camera on to be seen, /mute to stop sending your microphone, /hangup to end it."
 	}
 	// Ringing is announced by the command that caused it.
 	return ""
@@ -123,6 +123,15 @@ func micNotice(live bool, peer string) string {
 		return quoted(peer) + " unmuted."
 	}
 	return quoted(peer) + " muted their microphone."
+}
+
+// camNotice is the other side's camera changing state, for the same reason: a
+// black video window and a camera nobody turned on look identical.
+func camNotice(live bool, peer string) string {
+	if live {
+		return quoted(peer) + " turned their camera on."
+	}
+	return quoted(peer) + " turned their camera off."
 }
 
 // promptRecord is what a Security Code prompt leaves in the conversation: the
@@ -181,7 +190,7 @@ func (m Model) statusLine() string {
 }
 
 // callStatus is where the Call stands, on the status line: what it is doing,
-// and — once it is running — whose microphone is off.
+// and — once it is running — whose microphone is off and whose camera is on.
 func (m Model) callStatus() string {
 	switch m.call {
 	case session.Ringing:
@@ -195,8 +204,14 @@ func (m Model) callStatus() string {
 		if m.sess != nil && m.sess.Muted() {
 			status += " · muted"
 		}
+		if m.sess != nil && m.sess.CameraOn() {
+			status += " · camera on"
+		}
 		if !m.remoteMic {
 			status += " · they are muted"
+		}
+		if m.remoteCam {
+			status += " · their camera is on"
 		}
 		return status
 	}

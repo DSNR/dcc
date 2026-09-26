@@ -55,6 +55,13 @@ func (wasapiDevices) Playback() (Sink, error) {
 	return s, nil
 }
 
+// Camera on Windows is deferred: no pure-Go Windows camera library exists,
+// and pulling cgo into this build to get one would cost the plain
+// cross-compile the rest of dcc relies on (ADR 0002). The camera transceiver
+// is still negotiated, so the protocol is identical — this side simply never
+// writes a frame to it and says cam:false. Windows receives video normally.
+func (wasapiDevices) Camera() (Camera, error) { return nil, ErrNoCamera }
+
 // openStream starts one endpoint's goroutine and waits for it to report
 // whether the device opened. Capture and render differ only in which
 // endpoint they ask for and which way the audio then flows.

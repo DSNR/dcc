@@ -1,6 +1,8 @@
 package session_test
 
 import (
+	"image"
+	"image/color"
 	"testing"
 	"time"
 
@@ -16,12 +18,19 @@ const (
 	peerTone = 1100.0
 )
 
+// The two tints the fake cameras paint, for the same reason: a picture that
+// is mostly the host's red cannot have come from the peer's blue camera.
+var (
+	hostTint = color.RGBA{R: 200, G: 40, B: 40, A: 0xFF}
+	peerTint = color.RGBA{R: 40, G: 40, B: 200, A: 0xFF}
+)
+
 // callPair brings up a Connected pair whose Calls run on fake devices, and
 // returns both Sessions with the fakes their audio lands in.
 func callPair(t *testing.T, ring time.Duration) (host, peer *session.Session, hostFake, peerFake *media.Fake) {
 	t.Helper()
-	hostFake = &media.Fake{Tone: hostTone}
-	peerFake = &media.Fake{Tone: peerTone}
+	hostFake = &media.Fake{Tone: hostTone, Tint: hostTint}
+	peerFake = &media.Fake{Tone: peerTone, Tint: peerTint}
 	host = newCallSession(t, "Alice", hostFake, ring)
 	peer = newCallSession(t, "Bob", peerFake, ring)
 
@@ -73,6 +82,21 @@ func waitMic(t *testing.T, s *session.Session, want bool) {
 			t.Fatalf("events closed before the other side's mic was %v", want)
 		}
 		if mc, isMedia := e.(session.MediaChanged); isMedia && mc.Mic == want {
+			return
+		}
+	}
+}
+
+// waitCam drains events until the other side announces its camera in the
+// wanted state.
+func waitCam(t *testing.T, s *session.Session, want bool) {
+	t.Helper()
+	for {
+		e, ok := nextEvent(t, s)
+		if !ok {
+			t.Fatalf("events closed before the other side's camera was %v", want)
+		}
+		if mc, isMedia := e.(session.MediaChanged); isMedia && mc.Cam == want {
 			return
 		}
 	}
@@ -273,11 +297,13 @@ func TestSecondCall(t *testing.T) {
 	}
 }
 
-// deafDevices has no sound card at all, the way a headless machine does not.
+// deafDevices has no sound card and no camera at all, the way a headless
+// machine does not.
 type deafDevices struct{}
 
 func (deafDevices) Capture() (media.Source, error) { return nil, media.ErrNoDevices }
 func (deafDevices) Playback() (media.Sink, error)  { return nil, media.ErrNoDevices }
+func (deafDevices) Camera() (media.Camera, error)  { return nil, media.ErrNoCamera }
 
 // TestCallWithoutDevices checks a machine with no microphone still holds a
 // Call — it simply cannot speak, and is refused the pretence of unmuting.
@@ -300,11 +326,18 @@ func TestCallWithoutDevices(t *testing.T) {
 	waitCall(t, host, session.Active)
 	waitCall(t, peer, session.Active)
 
-	// The other side is told this one is not speaking, and unmuting a
-	// microphone that does not exist is refused rather than announced.
+	// The other side is told this one is not speaking, and turning on a
+	// microphone or a camera that does not exist is refused rather than
+	// announced.
 	waitMic(t, peer, false)
 	if err := host.Mute(false); err == nil {
 		t.Fatal("a Session with no microphone unmuted one")
+	}
+	if err := host.Camera(true); err == nil {
+		t.Fatal("a Session with no camera turned one on")
+	}
+	if host.CameraOn() {
+		t.Error("a camera that would not open reads as on")
 	}
 }
 
@@ -323,5 +356,98 @@ func TestCallNeedsAConnectedSession(t *testing.T) {
 	}
 	if err := s.Mute(true); err == nil {
 		t.Error("an Idle Session muted a Call")
+	}
+}
+
+// TestCallCarriesVideo is the camera's whole path: turned on inside an Active
+// Call it shows up on the other side — as a media state the other end can see
+// and as pictures it can paint — and turned off it stops, both the sending and
+// the saying so.
+func TestCallCarriesVideo(t *testing.T) {
+	host, peer, _, _ := callPair(t, 0)
+
+	if _, err := host.Call(); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	waitCall(t, peer, session.Incoming)
+	if err := peer.Answer(); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	waitCall(t, host, session.Active)
+	waitCall(t, peer, session.Active)
+
+	// A Call starts with both cameras off: nobody's camera comes on because
+	// a Call did.
+	if host.CameraOn() {
+		t.Error("the host's camera is on before anyone turned it on")
+	}
+	if img := frame(peer, 500*time.Millisecond); img != nil {
+		t.Error("the peer is seeing video from a camera nobody turned on")
+	}
+
+	if err := host.Camera(true); err != nil {
+		t.Fatalf("Camera(true): %v", err)
+	}
+	if !host.CameraOn() {
+		t.Error("the host's camera is off after being turned on")
+	}
+	waitCam(t, peer, true)
+
+	img := frame(peer, 10*time.Second)
+	if img == nil {
+		t.Fatal("the peer never saw the host's camera")
+	}
+	if share := media.Tinted(img, hostTint); share < 0.7 {
+		t.Errorf("only %.0f%% of the picture is the host's tint", share*100)
+	}
+	if share := media.Tinted(img, peerTint); share > 0.1 {
+		t.Errorf("%.0f%% of the picture is the peer's own tint", share*100)
+	}
+
+	if err := host.Camera(false); err != nil {
+		t.Fatalf("Camera(false): %v", err)
+	}
+	if host.CameraOn() {
+		t.Error("the host's camera is on after being turned off")
+	}
+	waitCam(t, peer, false)
+
+	// Whatever was already in flight arrives; after that, nothing.
+	drainFrames(peer, time.Second)
+	if img := frame(peer, time.Second); img != nil {
+		t.Error("the peer is still seeing a camera that was turned off")
+	}
+
+	// Hanging up leaves the Session up for text, camera or no camera.
+	if err := host.Hangup(); err != nil {
+		t.Fatalf("Hangup: %v", err)
+	}
+	waitCall(t, host, session.NoCall)
+	waitCall(t, peer, session.NoCall)
+	if err := host.Camera(true); err == nil {
+		t.Fatal("a camera was turned on with no Call to turn it on in")
+	}
+}
+
+// frame waits up to wait for one decoded picture, or reports none arriving.
+func frame(s *session.Session, wait time.Duration) *image.RGBA {
+	select {
+	case img := <-s.Frames():
+		return img
+	case <-time.After(wait):
+		return nil
+	}
+}
+
+// drainFrames throws away whatever arrives for a while, so that an assertion
+// about nothing arriving afterwards means something.
+func drainFrames(s *session.Session, wait time.Duration) {
+	deadline := time.After(wait)
+	for {
+		select {
+		case <-s.Frames():
+		case <-deadline:
+			return
+		}
 	}
 }

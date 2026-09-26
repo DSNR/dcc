@@ -24,6 +24,8 @@ type end struct {
 	frames chan wire.Frame
 	down   chan error
 	audio  chan []byte
+	video  chan []byte
+	keyfr  chan struct{}
 	media  chan struct{}
 }
 
@@ -46,6 +48,8 @@ func start(t *testing.T, opts transport.Options) *end {
 		frames: make(chan wire.Frame, 64),
 		down:   make(chan error, 1),
 		audio:  make(chan []byte, 256),
+		video:  make(chan []byte, 64),
+		keyfr:  make(chan struct{}, 8),
 		media:  make(chan struct{}, 8),
 	}
 	opts.Signal = func(f wire.Frame) { e.toPeer <- f }
@@ -55,6 +59,18 @@ func start(t *testing.T, opts transport.Options) *end {
 	opts.Audio = func(payload []byte) {
 		select {
 		case e.audio <- append([]byte(nil), payload...):
+		default:
+		}
+	}
+	opts.Video = func(frame []byte) {
+		select {
+		case e.video <- append([]byte(nil), frame...):
+		default:
+		}
+	}
+	opts.KeyframeWanted = func() {
+		select {
+		case e.keyfr <- struct{}{}:
 		default:
 		}
 	}
