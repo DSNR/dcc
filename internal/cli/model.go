@@ -14,6 +14,7 @@ import (
 	"github.com/DSNR/dcc/internal/session"
 	"github.com/DSNR/dcc/internal/transport"
 	"github.com/DSNR/dcc/internal/wire"
+	"github.com/DSNR/dcc/internal/words"
 )
 
 const (
@@ -369,7 +370,7 @@ func (m Model) send(body string) (tea.Model, tea.Cmd) {
 		m.add(notice("Not sent: " + err.Error()))
 		return m, nil
 	}
-	m.add(entry{at: time.Now(), who: me, mine: true, body: body, id: id, status: session.TextPending})
+	m.add(entry{at: time.Now(), who: words.Me, mine: true, body: body, id: id, status: session.TextPending})
 	return m, nil
 }
 
@@ -387,7 +388,7 @@ func (m Model) placeCall() (tea.Model, tea.Cmd) {
 		m.add(notice("Could not call: " + err.Error()))
 		return m, nil
 	}
-	m.add(notice("Calling " + quoted(m.peerName()) + " — /hangup to give up."))
+	m.add(notice("Calling " + words.Quoted(m.peerName()) + " — /hangup to give up."))
 	return m, nil
 }
 
@@ -505,7 +506,7 @@ func (m *Model) apply(e session.Event) tea.Cmd {
 			m.prompt = nil
 			m.layout()
 		}
-		if said := stateNotice(e); said != "" {
+		if said := words.State(e); said != "" {
 			m.add(notice(said))
 		}
 
@@ -524,7 +525,7 @@ func (m *Model) apply(e session.Event) tea.Cmd {
 
 	case session.LinkChanged:
 		m.link = e.Link
-		m.add(notice(linkNotice(e.Link)))
+		m.add(notice(words.Link(e.Link)))
 
 	case session.TextReceived:
 		m.add(entry{at: e.At, who: m.peerName(), body: e.Body})

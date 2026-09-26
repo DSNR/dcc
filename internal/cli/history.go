@@ -6,6 +6,7 @@ import (
 
 	"github.com/DSNR/dcc/internal/identity"
 	"github.com/DSNR/dcc/internal/storage"
+	"github.com/DSNR/dcc/internal/words"
 )
 
 // Store is the slice of *storage.Store the terminal interface reads history
@@ -31,7 +32,7 @@ func (m *Model) couldNotRead(err error) {
 
 // nothingStored is the answer to a Display Name no Conversation carries.
 func (m *Model) nothingStored(name string) {
-	m.add(notice(fmt.Sprintf("Nothing is stored with %s. /history alone lists what there is.", quoted(name))))
+	m.add(notice(fmt.Sprintf("Nothing is stored with %s. /history alone lists what there is.", words.Quoted(name))))
 }
 
 // named filters the stored Conversations to those a Peer named name — more
@@ -80,11 +81,7 @@ func (m *Model) listConversations(conversations []storage.Conversation) {
 	}
 	m.add(notice("Stored Conversations — /history <name> reads one back:"))
 	for _, c := range conversations {
-		when := "no messages"
-		if c.Messages > 0 {
-			when = fmt.Sprintf("%d messages, last %s", c.Messages, c.LastAt.Format(dateStamp+" "+stamp))
-		}
-		m.add(notice(fmt.Sprintf("  %s — %s", quoted(c.Name), when)))
+		m.add(notice(fmt.Sprintf("  %s — %s", words.Quoted(c.Name), words.Stored(c.Messages, c.LastAt))))
 	}
 }
 
@@ -96,10 +93,10 @@ func (m *Model) showConversation(c storage.Conversation) {
 		return
 	}
 	if len(messages) == 0 {
-		m.add(notice(fmt.Sprintf("Nothing has been said with %s yet.", quoted(c.Name))))
+		m.add(notice(fmt.Sprintf("Nothing has been said with %s yet.", words.Quoted(c.Name))))
 		return
 	}
-	m.add(notice(fmt.Sprintf("The Conversation with %s:", quoted(c.Name))))
+	m.add(notice(fmt.Sprintf("The Conversation with %s:", words.Quoted(c.Name))))
 	m.showMessages(messages, c.Name)
 }
 
@@ -109,13 +106,13 @@ func (m *Model) showConversation(c storage.Conversation) {
 func (m *Model) showMessages(messages []storage.Message, name string) {
 	var day time.Time
 	for _, msg := range messages {
-		if y, mo, d := msg.At.Date(); day.IsZero() || day.Day() != d || day.Month() != mo || day.Year() != y {
+		if day.IsZero() || !words.SameDay(day, msg.At) {
 			day = msg.At
-			m.add(notice("— " + day.Format(dateStamp) + " —"))
+			m.add(notice(words.Day(day)))
 		}
 		who := name
 		if msg.Mine {
-			who = me
+			who = words.Me
 		}
 		m.add(entry{at: msg.At, who: who, mine: msg.Mine, body: msg.Body, status: msg.Status})
 	}
@@ -149,7 +146,7 @@ func (m *Model) clearHistory(name string) {
 	}
 	m.add(notice(fmt.Sprintf(
 		"Deleted the Conversation with %s from this device — their copy, and their next Session here, start fresh.",
-		quoted(name))))
+		words.Quoted(name))))
 }
 
 // restoreHistory puts what has been said with an accepted Peer back on
@@ -166,6 +163,6 @@ func (m *Model) restoreHistory(peer identity.PublicKey, name string) {
 	if len(messages) == 0 {
 		return
 	}
-	m.add(notice(fmt.Sprintf("The Conversation with %s so far:", quoted(name))))
+	m.add(notice(fmt.Sprintf("The Conversation with %s so far:", words.Quoted(name))))
 	m.showMessages(messages, name)
 }

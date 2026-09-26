@@ -7,20 +7,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/DSNR/dcc/internal/session"
+	"github.com/DSNR/dcc/internal/words"
 )
-
-// stamp is how a time is shown against every line. Seconds are noise in a
-// conversation; dates appear as their own lines where history spans days.
-const stamp = "15:04"
-
-// dateStamp is how a day is named where one has to be — over restored
-// history, and against a stored Conversation's last message.
-const dateStamp = "2 Jan 2006"
-
-// me is how this side is labelled in the conversation. The Display Name is on
-// the status line; in a conversation between two people, "you" reads better
-// than a name you chose for yourself.
-const me = "you"
 
 // entry is one thing that happened, in the order it happened: a message
 // either side sent, or a notice from dcc itself.
@@ -56,7 +44,7 @@ func render(entries []entry, width int) string {
 // lines renders one entry, wrapped to width, with continuations indented under
 // the timestamp so that the left edge always reads as a column of times.
 func (e entry) lines(width int) []string {
-	prefix := e.at.Format(stamp) + " "
+	prefix := e.at.Format(words.Stamp) + " "
 	body := e.who + ": " + e.body
 	if e.who == "" {
 		// A notice is dcc talking, and is marked as such rather than
@@ -87,17 +75,7 @@ func statusMarker(e entry) string {
 	if !e.mine {
 		return ""
 	}
-	switch e.status {
-	case session.TextPending:
-		return "…"
-	case session.TextSent:
-		return "✓"
-	case session.TextDelivered:
-		return "✓✓"
-	case session.TextFailed:
-		return "✗ not delivered"
-	}
-	return ""
+	return words.Delivery(e.status)
 }
 
 // wrap breaks one piece of text to width, keeping words whole where it can and
