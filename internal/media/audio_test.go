@@ -52,8 +52,8 @@ func TestAudioCaptures(t *testing.T) {
 	got.mu.Lock()
 	defer got.mu.Unlock()
 	for i, frame := range got.frames {
-		if len(frame) != media.FrameSamples {
-			t.Fatalf("frame %d is %d bytes, want %d", i, len(frame), media.FrameSamples)
+		if len(frame) != media.PayloadBytes {
+			t.Fatalf("frame %d is %d bytes, want %d", i, len(frame), media.PayloadBytes)
 		}
 	}
 }

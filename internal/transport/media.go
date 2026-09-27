@@ -62,7 +62,7 @@ func (t *Transport) StartMedia() error {
 	t.mu.Unlock()
 
 	audio, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: media.MimeTypePCMU, ClockRate: media.SampleRate, Channels: 1},
+		webrtc.RTPCodecCapability{MimeType: media.MimeTypeG722, ClockRate: media.ClockRate, Channels: 1},
 		trackAudio, streamID,
 	)
 	if err != nil {
@@ -362,8 +362,8 @@ func (t *Transport) readVideo(track *webrtc.TrackRemote, stream *videoStream, de
 }
 
 // readAudio feeds each received audio frame to the Call. Padding-only
-// packets are skipped: they carry no audio, and handing an empty payload to
-// the decoder would play a frame of nothing that was never sent.
+// packets are skipped: they carry no audio, and handing an empty
+// payload to the decoder would play a frame of nothing that was never sent.
 func (t *Transport) readAudio(track *webrtc.TrackRemote) {
 	for {
 		pkt, _, err := track.ReadRTP()
@@ -406,18 +406,18 @@ func offerHasMedia(sdp string) bool {
 }
 
 // mediaEngine registers exactly the codecs dcc speaks — no more, so that an
-// SDP says what a Call can actually do: PCMU for audio, VP8 for the camera
+// SDP says what a Call can actually do: G.722 for audio, VP8 for the camera
 // and the screen.
 func mediaEngine() (*webrtc.MediaEngine, error) {
 	engine := &webrtc.MediaEngine{}
 	if err := engine.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:    media.MimeTypePCMU,
-			ClockRate:   media.SampleRate,
+			MimeType:    media.MimeTypeG722,
+			ClockRate:   media.ClockRate,
 			Channels:    1,
 			SDPFmtpLine: "",
 		},
-		PayloadType: media.PayloadTypePCMU,
+		PayloadType: media.PayloadTypeG722,
 	}, webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, fmt.Errorf("transport: registering the audio codec: %w", err)
 	}

@@ -4,7 +4,7 @@
 // end by a fake microphone and test-pattern camera and screen in a test with no
 // sound card, webcam or display anywhere near it.
 //
-// Audio is G.711 µ-law at 8 kHz (ADR 0004); both video streams are VP8 through
+// Audio is G.722 at 16 kHz (ADR 0005); both video streams are VP8 through
 // govpx's pure-Go encoder (ADR 0002), which is why the pipeline paces itself at
 // a conservative size and frame rate. The microphone stays open while muted, so
 // unmuting is instant; the camera and the screen are released the moment they
