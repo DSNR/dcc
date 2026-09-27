@@ -53,6 +53,10 @@ type Session interface {
 	Frames() <-chan *image.RGBA
 	// ScreenFrames is the other side's shared screen, on its own channel.
 	ScreenFrames() <-chan *image.RGBA
+	// LocalFrames is this side's own camera, before anything encoded it — the
+	// thumbnail the video window paints in the corner. Asking is what starts
+	// it, so a terminal with no window open never asks.
+	LocalFrames() <-chan *image.RGBA
 	// Close ends the Session and releases everything it holds.
 	Close() error
 }

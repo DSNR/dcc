@@ -192,6 +192,40 @@ func TestVideoWindowOpensWithTheCall(t *testing.T) {
 	h.until("the message to be sent", func() bool { return len(f.texts()) == 1 })
 }
 
+// TestVideoWindowShowsThisSidesCamera checks the window is opened over this
+// side's own camera as well as the other side's, and is told when that camera
+// comes on and goes off — which is what decides whether the thumbnail in the
+// corner is there at all.
+func TestVideoWindowShowsThisSidesCamera(t *testing.T) {
+	h, f, windows := connectedWithVideo(t, nil)
+	f.emit(session.CallChanged{State: session.Active, CallID: testCallID})
+	h.until("the video window to open", func() bool {
+		opened, _ := windows.counts()
+		return opened == 1
+	})
+	if got := windows.local(); got != f.LocalFrames() {
+		t.Error("the window was opened with nowhere to paint this side's own camera")
+	}
+
+	// A Call opens with this side's camera off, and the window is told that
+	// rather than left to guess from a picture that never arrives.
+	if got := windows.cameras(); len(got) != 1 || got[0] {
+		t.Fatalf("the window was told %v about this side's camera as the Call began", got)
+	}
+
+	h.submit("/camera on")
+	h.until("the window to be told about this side's camera", func() bool {
+		told := windows.cameras()
+		return len(told) == 2 && told[1]
+	})
+
+	h.submit("/camera off")
+	h.until("the thumbnail to be taken away", func() bool {
+		told := windows.cameras()
+		return len(told) == 3 && !told[2]
+	})
+}
+
 // TestVideoWindowClosedByHand checks closing the video window mid-Call is
 // noticed rather than leaving the terminal thinking it still has one — the
 // Call carries on, and so does the terminal.

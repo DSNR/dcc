@@ -16,6 +16,7 @@ people. Cloudflare is used only to find each other, never to hold content.
 | `internal/transport` | the WebRTC PeerConnection and the DataChannel |
 | `internal/storage` | Conversations in SQLite, encrypted at rest |
 | `internal/media` | capture, encode and decode for Calls — microphone, speaker, camera |
+| `internal/videoview` | a Call's picture in Gio — the other side large, this side a thumbnail — laid out once for both windows |
 | `internal/window` | the video window, in Gio, opened in-process by whichever UI wants one |
 | `internal/words` | the lines both clients say about a Session, written once |
 | `internal/client` | what both binaries do before their interface starts: flags, Identity, Store |
@@ -45,8 +46,10 @@ slash.
 `/call` rings the other person; inside a Call, `/camera on` sends this side's
 webcam and `/camera off` releases the device again. A Call's video appears in a
 window of its own, opened in this same process when the Call goes Active and
-closed when it ends, so the terminal stays a terminal. Windows receives video
-but does not send it — there is no pure-Go Windows camera library, and ADR 0002
+closed when it ends, so the terminal stays a terminal. The other person fills
+that window — their screen while they are sharing one — with this side's own
+camera as a thumbnail in the corner while it is on. Windows receives video but
+does not send it — there is no pure-Go Windows camera library, and ADR 0002
 records why dcc will not pull in cgo for one.
 
 Two clients on one machine need no Cloudflare account and no `cloudflared` at
@@ -115,7 +118,10 @@ cross-compiles from Linux with nothing installed.
 Real `cloudflared` tunnels, real capture devices — microphone and webcam — and
 browser interop are verified by hand; the test suite covers the in-process
 seams only. The terminal tests watch the video window open and close without
-one appearing on screen. To see a real one:
+one appearing on screen, `internal/window` checks which picture it is for
+without opening it, and `internal/videoview` lays that picture out — thumbnail
+and all — into an `op.Ops` with no window behind it, which needs no tags at
+all. To see a real one:
 
 ```sh
 DCC_WINDOW=1 go test -tags novulkan ./internal/window/

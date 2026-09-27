@@ -77,6 +77,7 @@ type fakeSession struct {
 	sharing bool
 	frames  chan *image.RGBA
 	screens chan *image.RGBA
+	local   chan *image.RGBA
 
 	// hostErr, joinErr, sendErr, callErr, cameraErr and shareErr are what the
 	// next matching command returns; zero means it succeeds.
@@ -88,6 +89,7 @@ func newFake() *fakeSession {
 		events:  make(chan session.Event, 64),
 		frames:  make(chan *image.RGBA, 1),
 		screens: make(chan *image.RGBA, 1),
+		local:   make(chan *image.RGBA, 1),
 	}
 }
 
@@ -214,6 +216,8 @@ func (f *fakeSession) Frames() <-chan *image.RGBA { return f.frames }
 
 func (f *fakeSession) ScreenFrames() <-chan *image.RGBA { return f.screens }
 
+func (f *fakeSession) LocalFrames() <-chan *image.RGBA { return f.local }
+
 // shareCalls is what the TUI asked of the screen share.
 func (f *fakeSession) shareCalls() []bool {
 	f.mu.Lock()
@@ -280,7 +284,10 @@ type fakeWindow struct {
 	// showing records every Sharing the window was told, so a test can check
 	// what it was pointed at and when.
 	showing []bool
-	done    chan struct{}
+	// cams records every Camera the window was told, which is what decides
+	// whether this side's own thumbnail is in the corner.
+	cams []bool
+	done chan struct{}
 }
 
 func newWindows() *fakeWindow {
@@ -316,6 +323,29 @@ func (w *fakeWindow) screen() <-chan *image.RGBA {
 		return nil
 	}
 	return w.opened[len(w.opened)-1].Screen
+}
+
+func (w *fakeWindow) Camera(on bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.cams = append(w.cams, on)
+}
+
+// cameras is what the window was told about this side's camera, in order.
+func (w *fakeWindow) cameras() []bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]bool(nil), w.cams...)
+}
+
+// local is the channel this side's own camera was to be painted from.
+func (w *fakeWindow) local() <-chan *image.RGBA {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.opened) == 0 {
+		return nil
+	}
+	return w.opened[len(w.opened)-1].Local
 }
 
 func (w *fakeWindow) Close() {

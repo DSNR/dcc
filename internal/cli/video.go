@@ -21,6 +21,10 @@ type VideoOptions struct {
 	// Screen is the other side's shared screen, on the same terms, which
 	// takes the window over while they are sharing.
 	Screen <-chan *image.RGBA
+	// Local is this side's own camera, on the same terms again: the thumbnail
+	// in the corner, so that what the other person is being shown is in front
+	// of the person sending it.
+	Local <-chan *image.RGBA
 	// Failed reports a window that could not be opened or that died.
 	Failed func(error)
 }
@@ -31,6 +35,10 @@ type VideoWindow interface {
 	// Sharing says whether the other side is sharing their screen, which is
 	// what decides whether the window shows their screen or their camera.
 	Sharing(on bool)
+	// Camera says whether this side's camera is on, which is what decides
+	// whether the thumbnail in the corner is there: a camera that has been
+	// turned off must take its last picture with it.
+	Camera(on bool)
 	// Close takes the window down. It returns at once, and closing twice — or
 	// closing one the participant has already closed — is fine.
 	Close()

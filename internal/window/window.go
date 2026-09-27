@@ -1,5 +1,5 @@
-// Package window is dcc's video window: the other side's Call video, in a
-// desktop window of its own, opened in-process by whichever UI wants one.
+// Package window is dcc's video window: the Call's video, in a desktop window
+// of its own, opened in-process by whichever UI wants one.
 // dcc-cli opens one when a Call goes Active and closes it when the Call ends,
 // which is what keeps the terminal a terminal.
 //
@@ -9,16 +9,14 @@ package window
 
 import (
 	"image"
-	"image/color"
 	"sync"
 
 	"gioui.org/app"
 	"gioui.org/io/system"
-	"gioui.org/layout"
 	"gioui.org/op"
-	"gioui.org/op/paint"
 	"gioui.org/unit"
-	"gioui.org/widget"
+
+	"github.com/DSNR/dcc/internal/videoview"
 )
 
 // The window's starting size, in device-independent pixels — the frame size
@@ -41,19 +39,23 @@ type Options struct {
 	// at is what the other person needs to see; their face is the thing that
 	// can wait.
 	Screen <-chan *image.RGBA
+	// Local is this side's own camera, on the same terms again — the
+	// thumbnail in the corner, painted while Camera is on. Nil, or a camera
+	// nobody turned on, shows no thumbnail.
+	Local <-chan *image.RGBA
 	// Failed reports a window that could not be opened or that died — no
 	// display, no GPU, a compositor that went away. Nil says nothing.
 	Failed func(error)
 }
 
 // Window is one open video window. It paints whatever arrives on Frames — or
-// on Screen, while a share is running — and stops when it is closed, from here
-// or by the person clicking the close box.
+// on Screen, while a share is running — with this side's own camera as a
+// thumbnail over it, and stops when it is closed, from here or by the person
+// clicking the close box.
 //
-// It shows the other side's video, full window. The local thumbnail overlay
-// ADR 0003 describes for this window is not built yet — internal/chatwindow
-// paints one, and a Session hands out the frames for it, so what is left here
-// is painting them: see #32.
+// The layout is the one internal/chatwindow's call view draws, as ADR 0003
+// asks: the other side large, this side in the corner, so that what the other
+// person is being shown is always in front of the person sending it.
 type Window struct {
 	win *app.Window
 	// stop is closed by Close; done closes when the window's event loop has
@@ -63,11 +65,14 @@ type Window struct {
 	once sync.Once
 
 	mu sync.Mutex
-	// camera and screen are the newest frame of each stream; sharing picks
-	// which of them the window is for.
-	camera  *image.RGBA
-	screen  *image.RGBA
-	sharing bool
+	// camera and screen are the newest frame of the other side's two streams;
+	// sharing picks which of them the window is for. local is the newest frame
+	// of this side's own camera, painted over whichever it is while cameraOn.
+	camera   *image.RGBA
+	screen   *image.RGBA
+	local    *image.RGBA
+	sharing  bool
+	cameraOn bool
 }
 
 // Open puts a window on the screen and starts painting. It returns
@@ -84,8 +89,9 @@ func Open(opts Options) *Window {
 		app.Title(opts.Title),
 		app.Size(unit.Dp(startWidth), unit.Dp(startHeight)),
 	)
-	go w.feed(opts.Frames, false)
-	go w.feed(opts.Screen, true)
+	go w.feed(opts.Frames, w.keepCameraLocked)
+	go w.feed(opts.Screen, w.keepScreenLocked)
+	go w.feed(opts.Local, w.keepLocalLocked)
 	go w.paint(opts.Failed)
 	return w
 }
@@ -104,6 +110,25 @@ func (w *Window) Sharing(on bool) {
 	}
 }
 
+// Camera says whether this side's camera is on, which is what decides whether
+// the thumbnail is in the corner: a camera that has been turned off takes its
+// last picture with it rather than leaving a frozen face on the screen. It
+// returns at once and may be called before any local frame has arrived.
+func (w *Window) Camera(on bool) {
+	w.mu.Lock()
+	changed := w.cameraOn != on
+	w.cameraOn = on
+	if !on {
+		// The picture goes with the camera, so that turning it on again shows
+		// what the camera sees now rather than what it saw when it went off.
+		w.local = nil
+	}
+	w.mu.Unlock()
+	if changed {
+		w.win.Invalidate()
+	}
+}
+
 // Close takes the window down. It returns at once — the window closes on its
 // own goroutine — and closing twice, or closing one the participant has
 // already closed, is fine.
@@ -115,20 +140,33 @@ func (w *Window) Close() {
 // by the participant.
 func (w *Window) Closed() <-chan struct{} { return w.done }
 
-// feed keeps the newest frame of one stream and asks for a repaint. Only the
-// newest is kept: a window that fell behind should show the current picture,
-// not catch up through stale ones. One of these runs per stream, so neither
-// ever waits behind the other.
-func (w *Window) feed(frames <-chan *image.RGBA, screen bool) {
+// keepCameraLocked, keepScreenLocked and keepLocalLocked each hold on to one
+// stream's newest frame. They are what feed hands a frame to, so they are
+// called with the window's lock held.
+func (w *Window) keepCameraLocked(img *image.RGBA) { w.camera = img }
+
+func (w *Window) keepScreenLocked(img *image.RGBA) { w.screen = img }
+
+func (w *Window) keepLocalLocked(img *image.RGBA) {
+	// A picture captured before the camera was turned off can still be in
+	// flight; keeping it would put a stale face back in the corner the next
+	// time the camera comes on.
+	if !w.cameraOn {
+		return
+	}
+	w.local = img
+}
+
+// feed hands the newest frame of one stream to whichever keeper it belongs to
+// and asks for a repaint. Only the newest is kept: a window that fell behind
+// should show the current picture, not catch up through stale ones. One of
+// these runs per stream, so none ever waits behind another.
+func (w *Window) feed(frames <-chan *image.RGBA, keep func(*image.RGBA)) {
 	for {
 		select {
 		case img := <-frames:
 			w.mu.Lock()
-			if screen {
-				w.screen = img
-			} else {
-				w.camera = img
-			}
+			keep(img)
 			w.mu.Unlock()
 			w.win.Invalidate()
 		case <-w.stop:
@@ -159,24 +197,28 @@ func (w *Window) paint(failed func(error)) {
 			return
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
-			// Black behind the picture, so a frame that does not fill the
-			// window is letterboxed rather than showing whatever was there.
-			paint.Fill(gtx.Ops, color.NRGBA{A: 0xFF})
-			w.mu.Lock()
-			img := w.camera
-			if w.sharing && w.screen != nil {
-				img = w.screen
-			}
-			w.mu.Unlock()
-			if img != nil {
-				widget.Image{
-					Src:      paint.NewImageOp(img),
-					Fit:      widget.Contain,
-					Position: layout.Center,
-					Scale:    1 / gtx.Metric.PxPerDp,
-				}.Layout(gtx)
-			}
+			large, small := w.pictures()
+			// Nothing is said where a picture is missing: a window with no
+			// picture in it is black, which is the truth about a Call whose
+			// cameras are all off.
+			videoview.Layout(gtx, large, small, nil)
 			e.Frame(gtx.Ops)
 		}
 	}
+}
+
+// pictures is what to draw this frame: the other side large — their shared
+// screen while they are sharing one, their camera otherwise — and this side's
+// own camera as the thumbnail, while it is on.
+func (w *Window) pictures() (large, small *image.RGBA) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	large = w.camera
+	if w.sharing && w.screen != nil {
+		large = w.screen
+	}
+	if w.cameraOn {
+		small = w.local
+	}
+	return large, small
 }

@@ -9,7 +9,6 @@
 package chatwindow
 
 import (
-	"image"
 	"image/color"
 	"io"
 	"strings"
@@ -29,6 +28,7 @@ import (
 
 	"github.com/DSNR/dcc/internal/gui"
 	"github.com/DSNR/dcc/internal/identity"
+	"github.com/DSNR/dcc/internal/videoview"
 	"github.com/DSNR/dcc/internal/wire"
 	"github.com/DSNR/dcc/internal/words"
 )
@@ -326,7 +326,6 @@ var (
 	// Video is painted on black, so that a picture which does not fill its
 	// area is letterboxed rather than showing whatever was behind it, and
 	// whatever is said in place of a picture is said in light on dark.
-	videoBg = color.NRGBA{A: 0xFF}
 	videoFg = color.NRGBA{R: 0xD0, G: 0xD4, B: 0xDC, A: 0xFF}
 	stampFg = color.NRGBA{R: 0x8A, G: 0x8F, B: 0x98, A: 0xFF}
 )
@@ -466,41 +465,14 @@ func (u *ui) callButton(click *widget.Clickable, label string, live bool, bg col
 	})
 }
 
-// video is the Call's pictures: the other side large — their shared screen
-// while they are sharing one, their camera otherwise — and this side's own
-// camera in the corner, so that what the other person is being shown is always
-// in front of the person sending it.
+// video is the Call's pictures, drawn the way internal/window draws them too:
+// the other side large — their shared screen while they are sharing one, their
+// camera otherwise — and this side's own camera in the corner, with a line
+// about what is missing where there is no picture at all.
 func (u *ui) video(gtx layout.Context, c gui.Call) layout.Dimensions {
-	return layout.Stack{Alignment: layout.SE}.Layout(gtx,
-		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-			paint.Fill(gtx.Ops, videoBg)
-			if c.Large == nil {
-				return u.waiting(gtx, c.Waiting)
-			}
-			return u.picture(gtx, c.Large)
-		}),
-		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-			if c.Small == nil {
-				return layout.Dimensions{}
-			}
-			return layout.UniformInset(pad).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				gtx.Constraints = layout.Exact(pipSize(gtx.Constraints.Max, c.Small))
-				return u.picture(gtx, c.Small)
-			})
-		}),
-	)
-}
-
-// picture paints one frame, one ImageOp per frame, letterboxed inside whatever
-// space it was given: a picture is as big as it can be without being stretched
-// into the wrong shape.
-func (u *ui) picture(gtx layout.Context, img *image.RGBA) layout.Dimensions {
-	return widget.Image{
-		Src:      paint.NewImageOp(img),
-		Fit:      widget.Contain,
-		Position: layout.Center,
-		Scale:    1 / gtx.Metric.PxPerDp,
-	}.Layout(gtx)
+	return videoview.Layout(gtx, c.Large, c.Small, func(gtx layout.Context) layout.Dimensions {
+		return u.waiting(gtx, c.Waiting)
+	})
 }
 
 // waiting is what the video area says when there is no picture in it, centred
@@ -514,21 +486,6 @@ func (u *ui) waiting(gtx layout.Context, said string) layout.Dimensions {
 			return l.Layout(gtx)
 		})
 	})
-}
-
-// pipSize is how big the picture-in-picture is: a quarter of the area across,
-// in the picture's own shape, and never bigger than the space it sits in — a
-// thumbnail that grew to fill a small window would be hiding the person it is
-// a thumbnail beside.
-func pipSize(space image.Point, img *image.RGBA) image.Point {
-	bounds := img.Bounds()
-	width := min(max(space.X/4, 1), space.X)
-	height := width * bounds.Dy() / max(bounds.Dx(), 1)
-	if height > space.Y {
-		height = space.Y
-		width = min(height*bounds.Dx()/max(bounds.Dy(), 1), space.X)
-	}
-	return image.Pt(width, max(height, 1))
 }
 
 // inviteBar is the Invite, once there is one to hand over: the string in full

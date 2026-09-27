@@ -178,6 +178,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.add(notice(msg.text))
 		return m, nil
 
+	case cameraMsg:
+		// The window paints this side's thumbnail only while the camera it
+		// comes from is on, so it is told before the notice is read.
+		if m.video != nil {
+			m.video.Camera(msg.on)
+		}
+		m.add(notice(msg.text))
+		return m, nil
+
 	case videoGoneMsg:
 		if m.video == nil {
 			// The UI closed it, with the Call. Nothing to say.
@@ -608,6 +617,7 @@ func (m *Model) openVideo() tea.Cmd {
 		Title:  "dcc — " + m.peerName(),
 		Frames: m.sess.Frames(),
 		Screen: m.sess.ScreenFrames(),
+		Local:  m.sess.LocalFrames(),
 		Failed: func(err error) {
 			select {
 			case failed <- err:
@@ -618,6 +628,9 @@ func (m *Model) openVideo() tea.Cmd {
 	if m.video == nil {
 		return nil
 	}
+	// A Call opens with this side's camera off, but a window opened into one
+	// already running should not be guessing.
+	m.video.Camera(m.sess.CameraOn())
 	return waitVideo(m.video, failed)
 }
 
@@ -709,6 +722,12 @@ type (
 	overMsg struct{ from Session }
 	// noticeMsg is something a command run off the UI's goroutine has to say.
 	noticeMsg struct{ text string }
+	// cameraMsg is this side's camera having gone on or off, which the video
+	// window needs as well as the participant.
+	cameraMsg struct {
+		on   bool
+		text string
+	}
 	// videoGoneMsg is the video window closing — by the participant clicking
 	// its close box, or because the Call ended and the UI closed it.
 	videoGoneMsg struct{}
@@ -762,9 +781,9 @@ func cameraCmd(s Session, on bool) tea.Cmd {
 			return noticeMsg{text: "Camera: " + err.Error()}
 		}
 		if on {
-			return noticeMsg{text: "Camera on — they can see you."}
+			return cameraMsg{on: true, text: "Camera on — they can see you."}
 		}
-		return noticeMsg{text: "Camera off — the device is released."}
+		return cameraMsg{text: "Camera off — the device is released."}
 	}
 }
 

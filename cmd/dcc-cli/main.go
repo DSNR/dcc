@@ -57,6 +57,7 @@ func run() error {
 				Title:  opts.Title,
 				Frames: opts.Frames,
 				Screen: opts.Screen,
+				Local:  opts.Local,
 				Failed: opts.Failed,
 			})
 		},
