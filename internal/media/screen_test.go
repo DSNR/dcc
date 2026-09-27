@@ -11,7 +11,7 @@ import (
 // TestScreenSize checks what a display is scaled to on its way to the encoder:
 // large ones brought inside the cap with their shape intact, and every result
 // a whole number of macroblocks, which is the only frame size the encoder can
-// be trusted with (ADR 0005).
+// be trusted with (ADR 0006).
 func TestScreenSize(t *testing.T) {
 	for _, c := range []struct {
 		name                  string
@@ -119,7 +119,7 @@ func desktop(pic media.Picture, frame int) {
 const interFrameRun = 45
 
 // TestScreenEncodesALongRunOfInterFrames is the regression test for the crash
-// ADR 0005 is about: sharing a screen took the whole process down a few seconds
+// ADR 0006 is about: sharing a screen took the whole process down a few seconds
 // in, inside govpx, reading sixteen rows of a macroblock row that only had
 // eight. Both sizes here are deliberately not whole numbers of macroblocks —
 // which is what a display, or a camera, is free to hand over — so what is being

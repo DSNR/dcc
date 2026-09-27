@@ -34,7 +34,7 @@ const (
 	// has a bottom row and a right column of part-macroblocks, and govpx
 	// reads those as if they were whole: sixteen rows into a source plane
 	// that has eight rows left, which is an index out of range that takes
-	// the process down with it. ADR 0005 has the details.
+	// the process down with it. ADR 0006 has the details.
 	videoMacroblock = 16
 )
 
@@ -103,7 +103,7 @@ func (e *encoder) encode(pic Picture, force bool) (frame []byte, err error) {
 		return nil, errors.New("media: the VP8 encoder was abandoned after it panicked")
 	}
 	// govpx is a young encoder and reads a little past the planes it is
-	// handed in places (ADR 0005). None of that is worth a dead process, so a
+	// handed in places (ADR 0006). None of that is worth a dead process, so a
 	// panic becomes an error here, and the capture goroutine treats it the
 	// way it treats a device that died: the stream stops and the other side
 	// is told this side is no longer sending. The encoder is abandoned rather
