@@ -37,7 +37,7 @@ func TestMediaFlowsBothWays(t *testing.T) {
 func TestWriteAudioBeforeCall(t *testing.T) {
 	certA, certB := newCertificate(t), newCertificate(t)
 	a := start(t, transport.Options{Certificate: certA, Remote: certB.Fingerprint(), Initiator: true})
-	if err := a.tr.WriteAudio(make([]byte, media.FrameSamples), media.FrameDuration); err == nil {
+	if err := a.tr.WriteAudio(make([]byte, media.PayloadBytes), media.FrameDuration); err == nil {
 		t.Fatal("audio was accepted with no Call to send it to")
 	}
 }
@@ -59,7 +59,7 @@ func waitMedia(t *testing.T, e *end) {
 // a stream may be written before the receiver has finished binding it.
 func sendUntilHeard(t *testing.T, from, to *end) {
 	t.Helper()
-	payload := media.Encode(make([]int16, media.FrameSamples), make([]byte, media.FrameSamples))
+	payload := media.NewEncoder().Encode(make([]int16, media.FrameSamples), make([]byte, media.PayloadBytes))
 	deadline := time.After(waitTimeout)
 	for {
 		if err := from.tr.WriteAudio(payload, media.FrameDuration); err != nil {

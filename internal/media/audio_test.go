@@ -52,8 +52,8 @@ func TestAudioCaptures(t *testing.T) {
 	got.mu.Lock()
 	defer got.mu.Unlock()
 	for i, frame := range got.frames {
-		if len(frame) != media.FrameSamples {
-			t.Fatalf("frame %d is %d bytes, want %d", i, len(frame), media.FrameSamples)
+		if len(frame) != media.PayloadBytes {
+			t.Fatalf("frame %d is %d bytes, want %d", i, len(frame), media.PayloadBytes)
 		}
 	}
 }
@@ -102,8 +102,8 @@ func TestAudioPlays(t *testing.T) {
 	got.mu.Lock()
 	frames := got.frames
 	got.mu.Unlock()
-	for _, frame := range frames {
-		audio.Play(frame)
+	for i, frame := range frames {
+		audio.Play(uint16(i), frame)
 	}
 
 	heard := devices.Heard()
@@ -131,5 +131,64 @@ func TestAudioCloseStopsSending(t *testing.T) {
 	}
 	if err := audio.Close(); err != nil {
 		t.Fatalf("Close twice: %v", err)
+	}
+}
+
+// TestAudioConcealsLoss proves a frame that never arrived is played as the
+// silence it was. Closing the gap instead would spend the playout buffer, a
+// frame of it per loss, and the Call would end up with nothing left to hide the
+// next late frame behind.
+func TestAudioConcealsLoss(t *testing.T) {
+	devices := &media.Fake{}
+	var got sent
+	audio, err := media.StartAudio(media.AudioOptions{Devices: devices, Send: got.take})
+	if err != nil {
+		t.Fatalf("StartAudio: %v", err)
+	}
+	defer audio.Close()
+
+	waitFrames(t, &got, 4)
+	got.mu.Lock()
+	frames := got.frames[:4]
+	got.mu.Unlock()
+
+	heard := devices.Heard()
+	heard.Reset()
+	// Frames 0 and 1 arrive, 2 is lost, 3 arrives.
+	audio.Play(0, frames[0])
+	audio.Play(1, frames[1])
+	audio.Play(3, frames[3])
+	if want := 4 * media.FrameSamples; len(heard.Samples()) != want {
+		t.Fatalf("the speaker got %d samples for four frames of timeline, want %d",
+			len(heard.Samples()), want)
+	}
+}
+
+// TestAudioDropsLateFrames proves a frame that arrives after the gap it
+// belonged to was already filled is thrown away. Playing it then would be
+// audibly worse than the gap it was meant to repair.
+func TestAudioDropsLateFrames(t *testing.T) {
+	devices := &media.Fake{}
+	var got sent
+	audio, err := media.StartAudio(media.AudioOptions{Devices: devices, Send: got.take})
+	if err != nil {
+		t.Fatalf("StartAudio: %v", err)
+	}
+	defer audio.Close()
+
+	waitFrames(t, &got, 4)
+	got.mu.Lock()
+	frames := got.frames[:4]
+	got.mu.Unlock()
+
+	heard := devices.Heard()
+	heard.Reset()
+	audio.Play(0, frames[0])
+	audio.Play(2, frames[2])
+	// Frame 1, arriving after 2 was played: too late to be worth hearing.
+	audio.Play(1, frames[1])
+	if want := 3 * media.FrameSamples; len(heard.Samples()) != want {
+		t.Fatalf("the speaker got %d samples, want %d — the late frame was played anyway",
+			len(heard.Samples()), want)
 	}
 }

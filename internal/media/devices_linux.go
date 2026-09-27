@@ -30,12 +30,13 @@ func (linuxDevices) Capture() (Source, error) {
 	if err != nil {
 		return nil, fmt.Errorf("media: connecting to PulseAudio: %w", err)
 	}
-	buf := newRing(SampleRate * bufferSeconds)
+	buf := newRing(captureFrames * FrameSamples)
 	stream, err := client.NewRecord(
 		pulse.Int16Writer(func(pcm []int16) (int, error) {
 			buf.write(pcm)
 			return len(pcm), nil
 		}),
+		pulse.RecordMono,
 		pulse.RecordSampleRate(SampleRate),
 		pulse.RecordLatency(FrameDuration.Seconds()),
 		pulse.RecordMediaName("dcc call"),
@@ -43,6 +44,14 @@ func (linuxDevices) Capture() (Source, error) {
 	if err != nil {
 		client.Close()
 		return nil, fmt.Errorf("media: opening the microphone: %w", err)
+	}
+	// PulseAudio is free to answer with a format of its own choosing. It
+	// never has, but if it ever did the Call would play back at the wrong
+	// speed, which is a stranger thing to debug than a refused microphone.
+	if err := checkFormat("microphone", stream.SampleRate(), stream.Channels()); err != nil {
+		stream.Close()
+		client.Close()
+		return nil, err
 	}
 	stream.Start()
 	return &pulseSource{client: client, stream: stream, buf: buf}, nil
@@ -54,7 +63,7 @@ func (linuxDevices) Playback() (Sink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("media: connecting to PulseAudio: %w", err)
 	}
-	buf := newRing(SampleRate * bufferSeconds)
+	buf := newPlayout(playoutTarget*FrameSamples, playoutFrames*FrameSamples)
 	stream, err := client.NewPlayback(
 		pulse.Int16Reader(func(pcm []int16) (int, error) {
 			// Always a full buffer: short reads read as the end of the
@@ -62,16 +71,35 @@ func (linuxDevices) Playback() (Sink, error) {
 			buf.fill(pcm)
 			return len(pcm), nil
 		}),
+		pulse.PlaybackMono,
 		pulse.PlaybackSampleRate(SampleRate),
-		pulse.PlaybackLatency(4*FrameDuration.Seconds()),
+		// Two frames, not four: the ring in front of this is the Call's
+		// jitter buffer, and a sound server that asks for more than half of
+		// it at a time would starve it on every read.
+		pulse.PlaybackLatency(2*FrameDuration.Seconds()),
 		pulse.PlaybackMediaName("dcc call"),
 	)
 	if err != nil {
 		client.Close()
 		return nil, fmt.Errorf("media: opening the speaker: %w", err)
 	}
+	if err := checkFormat("speaker", stream.SampleRate(), stream.Channels()); err != nil {
+		stream.Close()
+		client.Close()
+		return nil, err
+	}
 	stream.Start()
 	return &pulseSink{client: client, stream: stream, buf: buf}, nil
+}
+
+// checkFormat reports a stream the sound server did not open in the shape the
+// pipeline asked for.
+func checkFormat(what string, rate, channels int) error {
+	if rate != SampleRate || channels != 1 {
+		return fmt.Errorf("media: PulseAudio opened the %s at %d Hz in %d channels, not %d Hz mono",
+			what, rate, channels, SampleRate)
+	}
+	return nil
 }
 
 // pulseSource is a running record stream behind the Source boundary.

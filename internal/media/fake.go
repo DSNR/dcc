@@ -10,7 +10,7 @@ import (
 )
 
 // ToneFrequency is the note a Fake microphone hums when it is not told
-// otherwise — A above middle C, well inside a telephone band.
+// otherwise — A above middle C, well inside the band a Call carries.
 const ToneFrequency = 440.0
 
 // TestPatternTint is the colour a Fake camera paints when it is not told

@@ -349,7 +349,7 @@ func (s *Session) sendAudio(gen int, payload []byte, d time.Duration) {
 }
 
 // onAudio plays one received frame.
-func (s *Session) onAudio(gen int, payload []byte) {
+func (s *Session) onAudio(gen int, seq uint16, payload []byte) {
 	s.mu.Lock()
 	audio := s.audio
 	stale := s.closed || gen != s.gen || s.callState != Active
@@ -357,7 +357,7 @@ func (s *Session) onAudio(gen int, payload []byte) {
 	if stale || audio == nil {
 		return
 	}
-	audio.Play(payload)
+	audio.Play(seq, payload)
 }
 
 // announceMediaLocked tells the other side which of this side's streams are

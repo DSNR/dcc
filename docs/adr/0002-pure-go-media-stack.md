@@ -2,8 +2,10 @@
 
 `pion/mediadevices` is the only integrated capture+encode stack for pion, but every codec it ships and most of its drivers are cgo, which would cost the plain cross-compile from Linux that the rest of dcc relies on. We take pure Go as the default build on both OSes: `go-wca` / `jfreymuth/pulse` for audio, `blackjack/webcam` for the Linux camera, `kbinani/screenshot` for screen, VP8 via `thesyncim/govpx`, Opus via `pion/opus`. Both codecs are months old with few users, so a prototype gates the build and every driver and codec sits behind an interface with a `cgo`-tagged alternate (mediadevices openh264/opus static libs, cross-built with zig). No pure-Go Windows camera library exists, so Windows send-side webcam is deferred past MVP rather than pulling cgo into the Windows build.
 
-Its audio-codec half is superseded by ADR 0004: no pure-Go Opus encoder
-exists, so MVP audio is G.711 µ-law. Everything else here stands.
+Its audio-codec half is superseded by ADR 0004 and then ADR 0005: audio is
+G.722 at 16 kHz. A pure-Go Opus encoder does exist now, on an untagged
+`pion/opus` commit, and ADR 0005 records why it is the next step rather than
+this one. Everything else here stands.
 
 ## Consequences
 

@@ -157,10 +157,17 @@ accept, but only one side offers, and an offer that arrives before the other
 side has got there makes its transceivers for it — the two accepts travel on
 different transports, so neither can assume it was first.
 
-Audio is **G.711 µ-law — PCMU, RTP payload type 0, 8 kHz mono, 20 ms
-frames**; ADR 0004 records why it is not Opus. A received RTP packet with an
+Audio is **G.722 — RTP payload type 9, 16 kHz mono, 20 ms frames, 64 kbit/s**,
+so one frame is 160 bytes. Its RTP clock rate is **8000**, not 16000: a known
+wart of RFC 3551 that every stack reproduces, so a 20 ms frame advances the
+timestamp by 160. ADR 0005 records why it is not Opus or uncompressed PCM, and
+ADR 0004 why it was G.711 µ-law before that. A received RTP packet with an
 empty payload is padding, and is skipped rather than decoded: it carries no
-audio, and playing it would be a frame of silence nobody sent.
+audio, and playing it would be a frame of silence nobody sent. A gap in the
+audio sequence numbers is played as silence of the same length rather than
+closed up, so that losing a frame costs a frame and not the playout buffer,
+and a frame that arrives after its gap was filled is dropped rather than
+played out of order.
 
 Video is **VP8 — RTP payload type 96, 90 kHz clock**, on two tracks named
 `cam` and `screen` within the `dcc` stream, which is how each side tells the

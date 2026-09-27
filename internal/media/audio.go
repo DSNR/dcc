@@ -8,18 +8,30 @@ import (
 )
 
 // The shape of dcc's audio, at the device boundary and on the wire. One mono
-// stream at telephone quality, cut into 20 ms frames: small enough that a
-// lost one is inaudible, large enough that the RTP header is not most of the
-// packet.
+// wideband stream, cut into 20 ms frames: small enough that a lost one is
+// inaudible, large enough that the RTP header is not most of the packet.
 const (
 	// SampleRate is the pipeline's sample rate in hertz. A driver whose
 	// hardware disagrees resamples on its own side of the boundary.
-	SampleRate = 8000
+	SampleRate = 16000
 	// FrameDuration is how much audio one frame carries.
 	FrameDuration = 20 * time.Millisecond
 	// FrameSamples is FrameDuration's worth of samples — the length of every
 	// PCM buffer that crosses the boundary.
 	FrameSamples = SampleRate * int(FrameDuration) / int(time.Second)
+	// PayloadBytes is one encoded frame's size on the wire. G.722 spends one
+	// byte on every two samples, so a frame is 160 bytes — the same as the
+	// µ-law it replaced, at twice the audio bandwidth.
+	PayloadBytes = FrameSamples / 2
+	// concealLimit is how long a gap in the other side's frames is worth
+	// filling with silence. Beyond it they stopped talking to us — muted, or
+	// a network that went away — and the stream picks up wherever it resumes
+	// rather than playing out seconds of catch-up silence.
+	concealLimit = 10
+	// playLimit is the largest frame this side will decode, in payload
+	// bytes: half a second, far more than any frame dcc sends, so that a
+	// peer claiming an enormous frame cannot make this side allocate for it.
+	playLimit = SampleRate / 2 / 2
 )
 
 // Source is a microphone: successive frames of signed 16-bit mono PCM at
@@ -83,6 +95,16 @@ type Audio struct {
 	muted  bool
 	source Source
 	sink   Sink
+	// enc and dec carry the codec's adaptive state, which belongs to the
+	// stream rather than to any one frame: one of each, for this Call's two
+	// directions.
+	enc *Encoder
+	dec *Decoder
+	// expect is the sequence number the next frame should carry, so that a
+	// gap can be played as the silence it is rather than closing up and
+	// running the playout buffer dry. Zero until the first frame arrives.
+	expect  uint16
+	started bool
 	// play is the scratch buffer Play decodes into, reused across frames
 	// the way capture reuses its own — fifty frames a second is no place to
 	// be allocating.
@@ -116,6 +138,8 @@ func StartAudio(opts AudioOptions) (*Audio, error) {
 		muted:  opts.Muted,
 		source: source,
 		sink:   sink,
+		enc:    NewEncoder(),
+		dec:    NewDecoder(),
 		play:   make([]int16, FrameSamples),
 		done:   make(chan struct{}),
 	}
@@ -139,23 +163,41 @@ func (a *Audio) Muted() bool {
 	return a.muted
 }
 
-// Play decodes one received frame into the speaker. A frame that arrives
-// after Close, or with nothing in it, is dropped. Frames are played in the
-// order they are handed over, which is the order the Call delivered them.
-func (a *Audio) Play(payload []byte) {
+// Play decodes one received frame into the speaker. seq is the frame's RTP
+// sequence number, which is how Play tells a lost frame from a late one: a
+// gap is played as silence, so the stream keeps its own timing instead of
+// closing up and starving the playout buffer, and a frame that arrives after
+// the gap was already filled is thrown away rather than played out of order.
+// A frame that arrives after Close, or with nothing in it, is dropped.
+func (a *Audio) Play(seq uint16, payload []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed || a.sink == nil || len(payload) == 0 {
+	if a.closed || a.sink == nil || len(payload) == 0 || len(payload) > playLimit {
 		return
 	}
-	if len(payload) > len(a.play) {
+	if samples := 2 * len(payload); samples > len(a.play) {
 		// A frame longer than this pipeline's own: the other side is
 		// allowed a different frame size, so the buffer grows to it once.
-		a.play = make([]int16, len(payload))
+		a.play = make([]int16, samples)
 	}
+	if a.started {
+		// int16 so that wrapping past 65535 reads as the small step it is.
+		switch gap := int16(seq - a.expect); {
+		case gap < 0:
+			// Older than what has already been played: too late to be worth
+			// hearing, and playing it now would be worse than the gap it
+			// was meant to fill.
+			return
+		case gap > 0 && int(gap) <= concealLimit:
+			for range gap {
+				_ = a.sink.Write(a.dec.Conceal(a.play[:FrameSamples]))
+			}
+		}
+	}
+	a.expect, a.started = seq+1, true
 	// A dropped frame is a click; a dropped Call is not. Playback errors are
 	// this side's speaker misbehaving and say nothing about the connection.
-	_ = a.sink.Write(Decode(payload, a.play))
+	_ = a.sink.Write(a.dec.Decode(payload, a.play))
 }
 
 // Close stops capture and releases both devices. It waits for the capture
@@ -187,7 +229,7 @@ func (a *Audio) Close() error {
 func (a *Audio) capture() {
 	defer close(a.done)
 	pcm := make([]int16, FrameSamples)
-	payload := make([]byte, FrameSamples)
+	payload := make([]byte, PayloadBytes)
 	for {
 		a.mu.Lock()
 		source, closed := a.source, a.closed
@@ -209,6 +251,6 @@ func (a *Audio) capture() {
 		if muted {
 			continue
 		}
-		a.send(Encode(pcm, payload), FrameDuration)
+		a.send(a.enc.Encode(pcm, payload), FrameDuration)
 	}
 }

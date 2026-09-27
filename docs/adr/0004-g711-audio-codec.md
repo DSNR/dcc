@@ -1,5 +1,10 @@
 # G.711 µ-law for MVP audio, not Opus
 
+Superseded by ADR 0005: audio is G.722 at 16 kHz. The reasoning below still
+records why it was not Opus at the time, and the boundary it describes — one
+`Encode`, one `Decode`, one `RTPCodecCapability`, one device sample rate — is
+the boundary the change went through, which is the part worth keeping.
+
 ADR 0002 picked Opus via `pion/opus` for audio. Building the Call showed that
 `pion/opus` is a **decoder only** — its one exported constructor is
 `NewDecoder`, and the only encoder in the module is an internal, partial CELT
