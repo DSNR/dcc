@@ -43,8 +43,12 @@ var ErrNoScreen = errors.New("media: no screen to share on this platform")
 
 // screenSize is the size a display of the given size is encoded at: scaled
 // down to fit inside ScreenMaxWidth by ScreenMaxHeight if it is larger,
-// untouched if it is not, and rounded down to even dimensions either way
-// because I420's chroma planes are half-size in both directions.
+// untouched if it is not, and rounded down to whole macroblocks either way.
+// Whole macroblocks because that is all the encoder will take
+// (videoMacroblock), and rounded here rather than cropped there because the
+// capture scales the whole display into whatever size this returns: a
+// participant sharing a 1080-row display gets all of it, imperceptibly
+// squashed, instead of the bottom eight rows cut off.
 func screenSize(width, height int) (int, int) {
 	if width > ScreenMaxWidth {
 		width, height = ScreenMaxWidth, height*ScreenMaxWidth/width
@@ -52,5 +56,5 @@ func screenSize(width, height int) (int, int) {
 	if height > ScreenMaxHeight {
 		width, height = width*ScreenMaxHeight/height, ScreenMaxHeight
 	}
-	return width & ^1, height & ^1
+	return width & ^(videoMacroblock - 1), height & ^(videoMacroblock - 1)
 }
