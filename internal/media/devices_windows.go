@@ -14,15 +14,23 @@ import (
 
 // The shape of the WASAPI streams dcc opens. Shared mode, so a Call never
 // takes the sound card away from anything else, and WASAPI's own converter,
-// so the pipeline can ask for 8 kHz mono whatever the device's mix format
+// so the pipeline can ask for SampleRate in mono whatever the device's mix format
 // actually is.
 const (
-	// wasapiFlags asks the audio engine to resample and downmix for us,
-	// which is what makes SampleRate a promise this driver can keep.
+	// wasapiFlags asks the audio engine to resample and downmix for us, which
+	// is what makes SampleRate a promise this driver can keep.
+	// SRC_DEFAULT_QUALITY is not the default: it asks for the better of the
+	// two resamplers Windows offers, at a cost worth paying for audio a
+	// person is going to listen to.
 	wasapiFlags = wca.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | wca.AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
 	// wasapiBuffer is the endpoint buffer, in REFERENCE_TIME's 100 ns
 	// units: 100 ms, enough that a scheduling hiccup is not a dropout.
 	wasapiBuffer = 100 * 10_000
+	// renderAhead is how much audio the speaker's endpoint is kept holding,
+	// in frames. Two is enough that a missed poll is not a dropout and little
+	// enough that the ring, not the endpoint, is where a late frame is
+	// waited for.
+	renderAhead = 2
 	// sFalse and rpcChangedMode are CoInitializeEx saying the thread was
 	// already in an apartment — the one it asked for, or another one. Either
 	// way there is an apartment, which is all this driver needs.
@@ -71,8 +79,12 @@ func (wasapiDevices) Screen() (Screen, error) { return openScreen() }
 // whether the device opened. Capture and render differ only in which
 // endpoint they ask for and which way the audio then flows.
 func openStream(dataFlow uint32) (*wasapiStream, error) {
+	buf := newRing(captureFrames * FrameSamples)
+	if dataFlow == wca.ERender {
+		buf = newPlayout(playoutTarget*FrameSamples, playoutFrames*FrameSamples)
+	}
 	s := &wasapiStream{
-		buf:   newRing(SampleRate * bufferSeconds),
+		buf:   buf,
 		ready: make(chan error, 1),
 		done:  make(chan struct{}),
 	}
@@ -246,11 +258,19 @@ func (s *wasapiStream) pumpCapture(capture *wca.IAudioCaptureClient) {
 }
 
 // pumpRender moves the ring into whatever room the speaker has, padding with
-// silence when the Call has nothing to say.
+// silence when the Call has nothing to say. It writes a frame at a time and
+// stops once the endpoint holds renderAhead: the jitter buffer that hides a
+// late frame is the ring, and audio handed to the endpoint early is audio the
+// ring can no longer hold back, so filling the endpoint to the brim would be
+// latency bought for nothing.
 func (s *wasapiStream) pumpRender(client *wca.IAudioClient, render *wca.IAudioRenderClient) {
 	var size uint32
 	if err := client.GetBufferSize(&size); err != nil {
 		return
+	}
+	ahead := uint32(renderAhead * FrameSamples)
+	if ahead > size {
+		ahead = size
 	}
 	for {
 		select {
@@ -263,7 +283,13 @@ func (s *wasapiStream) pumpRender(client *wca.IAudioClient, render *wca.IAudioRe
 		if err := client.GetCurrentPadding(&padding); err != nil {
 			return
 		}
-		frames := size - padding
+		if padding >= ahead {
+			if s.idle() {
+				return
+			}
+			continue
+		}
+		frames := min(ahead-padding, uint32(FrameSamples))
 		if frames == 0 {
 			if s.idle() {
 				return
