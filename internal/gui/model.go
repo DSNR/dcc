@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"image"
 	"strings"
 	"sync"
 	"time"
@@ -72,6 +73,22 @@ type Model struct {
 	log   []Entry
 	index map[string]int
 
+	// call is where the Call inside the Session stands; theirMic, theirCam
+	// and theirScreen are what the other side last announced about their own
+	// streams. All four mean nothing while there is no Call.
+	call        session.CallState
+	theirMic    bool
+	theirCam    bool
+	theirScreen bool
+	// camPic, screenPic and myPic are the newest picture of each of a Call's
+	// three streams: the other side's camera, their shared screen, and this
+	// side's own camera. videoStop ends the goroutines that keep them, and is
+	// nil whenever there is no Call to keep them for.
+	camPic    *image.RGBA
+	screenPic *image.RGBA
+	myPic     *image.RGBA
+	videoStop chan struct{}
+
 	// conversations is the history panel's list, as of the last read.
 	conversations []Conversation
 	// shown is the Peers whose stored Conversation is already in the
@@ -114,6 +131,13 @@ func New(opts Options) *Model {
 // paints it without holding anything, so a Session's events never wait on a
 // frame.
 func (m *Model) Screen() Screen {
+	// What this side is sending is the Session's to answer for — a camera can
+	// release itself — so it is read from the Session, before the lock rather
+	// than under it: nothing here calls into a Session holding this Model's
+	// lock. The cost is that the answer can be a frame out of date, which the
+	// repaint that follows any change puts right.
+	own := m.ownStreams()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -122,6 +146,7 @@ func (m *Model) Screen() Screen {
 	conversations := make([]Conversation, len(m.conversations))
 	copy(conversations, m.conversations)
 
+	connected := m.sess != nil && m.state == session.Connected && m.prompt == nil && !m.closing
 	s := Screen{
 		Name:          m.name,
 		Status:        m.statusLine(),
@@ -130,11 +155,19 @@ func (m *Model) Screen() Screen {
 		Invite:        m.invite,
 		Conversations: conversations,
 		Closing:       m.closing,
+		Call:          m.callView(own),
 		Controls: Controls{
 			Host:       m.sess == nil && !m.closing,
 			Join:       m.sess == nil && !m.closing,
-			Send:       m.sess != nil && m.state == session.Connected && m.prompt == nil && !m.closing,
+			Send:       connected,
 			Disconnect: m.sess != nil && !m.closing,
+			Call:       connected && m.call == session.NoCall,
+			Answer:     m.call == session.Incoming && !m.closing,
+			Reject:     m.call == session.Incoming && !m.closing,
+			Hangup:     m.call != session.NoCall && !m.closing,
+			Mute:       m.call != session.NoCall && !m.closing,
+			Camera:     m.call == session.Active && !m.closing,
+			Share:      m.call == session.Active && !m.closing,
 		},
 	}
 	if m.prompt != nil {
@@ -325,6 +358,257 @@ func (m *Model) Send(body string) (sent bool) {
 	return true
 }
 
+// Call rings the other person. What comes of it arrives as events, so there is
+// nothing to report here beyond the ringing having started.
+func (m *Model) Call() {
+	m.mu.Lock()
+	s, peer := m.sess, m.peerName()
+	switch {
+	case m.prompt != nil:
+		m.add(notice("Check the Security Code with the other person first."))
+		m.mu.Unlock()
+		m.changed()
+		return
+	case m.closing || s == nil || m.state != session.Connected:
+		m.add(notice("There is nobody to call — host a Session, or connect to an Invite first."))
+		m.mu.Unlock()
+		m.changed()
+		return
+	case m.call != session.NoCall:
+		m.add(notice("There is already a Call — hang up to end it first."))
+		m.mu.Unlock()
+		m.changed()
+		return
+	}
+	m.mu.Unlock()
+
+	if _, err := s.Call(); err != nil {
+		m.say("Could not call: " + err.Error())
+		return
+	}
+	m.say("Calling " + words.Quoted(peer) + " — hang up to give up.")
+}
+
+// Answer picks up the Call ringing here. The media comes up behind it, which
+// the Call's own events announce.
+func (m *Model) Answer() {
+	s, ok := m.ringing("There is no Call to answer.")
+	if !ok {
+		return
+	}
+	if err := s.Answer(); err != nil {
+		m.say("Could not answer: " + err.Error())
+	}
+}
+
+// Reject turns down the Call ringing here, leaving the Session up for text.
+func (m *Model) Reject() {
+	s, ok := m.ringing("There is no Call to reject.")
+	if !ok {
+		return
+	}
+	if err := s.Reject(); err != nil {
+		m.say("Could not reject: " + err.Error())
+	}
+}
+
+// Hangup ends the Call — answered, still ringing here, or still ringing there
+// — and leaves the Session connected for text.
+func (m *Model) Hangup() {
+	s, ok := m.inCall("There is no Call to hang up. Disconnect ends the Session.")
+	if !ok {
+		return
+	}
+	if err := s.Hangup(); err != nil {
+		m.say(err.Error())
+	}
+}
+
+// Mute stops or resumes sending this side's microphone. The other side is told
+// either way: a muted microphone they cannot see is how people end up talking
+// to nobody.
+func (m *Model) Mute(muted bool) {
+	s, ok := m.inCall("There is no Call to mute.")
+	if !ok {
+		return
+	}
+	if err := s.Mute(muted); err != nil {
+		m.say(err.Error())
+		return
+	}
+	if muted {
+		m.say("Microphone muted — they can see that you are.")
+		return
+	}
+	m.say("Microphone live.")
+}
+
+// Camera turns this side's camera on or off. Opening a camera takes a moment,
+// so it happens off the window's goroutine — a window that stopped painting
+// while a webcam woke up would look broken.
+func (m *Model) Camera(on bool) {
+	s, ok := m.inCall("There is no Call to turn a camera on in.")
+	if !ok {
+		return
+	}
+	go func() {
+		if err := s.Camera(on); err != nil {
+			m.say("Camera: " + err.Error())
+			return
+		}
+		if on {
+			m.say("Camera on — they can see you.")
+			return
+		}
+		m.say("Camera off — the device is released.")
+	}()
+}
+
+// Share starts or stops sharing this side's entire screen. Like the camera it
+// opens a device, so it too happens off the window's goroutine.
+func (m *Model) Share(on bool) {
+	s, ok := m.inCall("There is no Call to share a screen into.")
+	if !ok {
+		return
+	}
+	go func() {
+		if err := s.Share(on); err != nil {
+			m.say("Screen share: " + err.Error())
+			return
+		}
+		if on {
+			m.say("Sharing your whole screen — Stop sharing ends it.")
+			return
+		}
+		m.say("Screen share stopped — the display is released.")
+	}()
+}
+
+// inCall is the Session a Call control is for, or the refusal said out loud
+// where there is no Call for it to be about.
+func (m *Model) inCall(refusal string) (Session, bool) {
+	return m.forCall(refusal, func(c session.CallState) bool { return c != session.NoCall })
+}
+
+// ringing is inCall for the two controls that only mean anything while a Call
+// is ringing here.
+func (m *Model) ringing(refusal string) (Session, bool) {
+	return m.forCall(refusal, func(c session.CallState) bool { return c == session.Incoming })
+}
+
+// forCall is what both of those are made of: the Session, if the Call is in a
+// state the control means anything in, and the refusal said out loud if it is
+// not. Every control the window greys out still checks — a Screen is a
+// snapshot, and a Call can end between one being painted and a button on it
+// being pressed.
+func (m *Model) forCall(refusal string, usable func(session.CallState) bool) (Session, bool) {
+	m.mu.Lock()
+	s := m.sess
+	if s == nil || !usable(m.call) {
+		m.add(notice(refusal))
+		m.mu.Unlock()
+		m.changed()
+		return nil, false
+	}
+	m.mu.Unlock()
+	return s, true
+}
+
+// ownStreams is what this side is sending, asked of the Session itself rather
+// than mirrored here, so that a device that stopped on its own reads as off.
+// It takes no lock of its own while asking.
+func (m *Model) ownStreams() streams {
+	m.mu.Lock()
+	s, running := m.sess, m.call != session.NoCall
+	m.mu.Unlock()
+	if s == nil || !running {
+		return streams{}
+	}
+	return streams{muted: s.Muted(), camera: s.CameraOn(), screen: s.Sharing()}
+}
+
+// streams is this side's own microphone, camera and screen share.
+type streams struct{ muted, camera, screen bool }
+
+// callView is the Call as the window shows it. It is called with the lock
+// held.
+func (m *Model) callView(own streams) Call {
+	c := Call{
+		State:       m.call,
+		Muted:       own.muted,
+		CameraOn:    own.camera,
+		Sharing:     own.screen,
+		TheirMic:    m.theirMic,
+		TheirCam:    m.theirCam,
+		TheirScreen: m.theirScreen,
+	}
+	if m.call == session.Active {
+		// What somebody is pointing at is what the other person needs to see,
+		// so a share takes the large picture over while it runs; a stream
+		// nobody has turned on shows nothing, whatever its last picture was.
+		switch {
+		case m.theirScreen:
+			c.Large = m.screenPic
+		case m.theirCam:
+			c.Large = m.camPic
+		}
+		if own.camera {
+			c.Small = m.myPic
+		}
+	}
+	if c.Video() && c.Large == nil {
+		c.Waiting = waiting(c)
+	}
+	c.Status = callStatus(c, m.peerName())
+	return c
+}
+
+// watchVideo follows a Call's three streams, keeping the newest picture of
+// each in front of the window. It is called with the lock held.
+func (m *Model) watchVideo(s Session) {
+	if m.videoStop != nil {
+		return
+	}
+	stop := make(chan struct{})
+	m.videoStop = stop
+	go m.pumpFrames(s.Frames(), stop, func(img *image.RGBA) { m.camPic = img })
+	go m.pumpFrames(s.ScreenFrames(), stop, func(img *image.RGBA) { m.screenPic = img })
+	go m.pumpFrames(s.LocalFrames(), stop, func(img *image.RGBA) { m.myPic = img })
+}
+
+// stopVideo stops following a Call's streams and forgets its pictures, which
+// is what the end of a Call does to them. It is called with the lock held.
+func (m *Model) stopVideo() {
+	if m.videoStop != nil {
+		close(m.videoStop)
+		m.videoStop = nil
+	}
+	m.camPic, m.screenPic, m.myPic = nil, nil, nil
+}
+
+// pumpFrames keeps one stream's newest picture and asks for a repaint. Only
+// the newest is kept: a window painting at its own rate should show the
+// current picture rather than work through stale ones. A picture still in hand
+// when the Call it belongs to ends is dropped — the Call it would have been
+// painted in is over, and the next one must not open on it.
+func (m *Model) pumpFrames(frames <-chan *image.RGBA, stop chan struct{}, keep func(*image.RGBA)) {
+	for {
+		select {
+		case img := <-frames:
+			m.mu.Lock()
+			if m.videoStop != stop {
+				m.mu.Unlock()
+				return
+			}
+			keep(img)
+			m.mu.Unlock()
+			m.changed()
+		case <-stop:
+			return
+		}
+	}
+}
+
 // Disconnect ends the Session but stays in the app, so that the conversation
 // can be read back and another Invite made.
 func (m *Model) Disconnect() {
@@ -400,6 +684,37 @@ func (m *Model) apply(e session.Event) {
 	case session.TextReceived:
 		m.add(Entry{At: e.At, Who: m.peerName(), Body: e.Body})
 
+	case session.CallChanged:
+		m.call = e.State
+		// A Call starts with both microphones live and every camera off; the
+		// other side's own media state follows and corrects this if it does
+		// not.
+		m.theirMic = e.State == session.Active
+		m.theirCam, m.theirScreen = false, false
+		if said := callNotice(e, m.peerName()); said != "" {
+			m.add(notice(said))
+		}
+		switch e.State {
+		case session.Active:
+			m.watchVideo(m.sess)
+		case session.NoCall:
+			m.stopVideo()
+		}
+
+	case session.MediaChanged:
+		if m.theirMic != e.Mic {
+			m.theirMic = e.Mic
+			m.add(notice(words.Mic(e.Mic, m.peerName())))
+		}
+		if m.theirCam != e.Cam {
+			m.theirCam = e.Cam
+			m.add(notice(words.Cam(e.Cam, m.peerName())))
+		}
+		if m.theirScreen != e.Screen {
+			m.theirScreen = e.Screen
+			m.add(notice(words.Share(e.Screen, m.peerName(), "the video area")))
+		}
+
 	case session.TextStatus:
 		i, known := m.index[e.ID]
 		if !known {
@@ -422,6 +737,9 @@ func (m *Model) released(s Session) {
 	m.prompt = nil
 	m.invite = ""
 	m.link = 0
+	m.call = session.NoCall
+	m.theirMic, m.theirCam, m.theirScreen = false, false, false
+	m.stopVideo()
 	if m.state != session.Idle && m.state != session.Disconnected && m.state != session.Failed {
 		m.state, m.reason = session.Disconnected, session.ReasonNone
 		m.add(notice("The Session is over."))

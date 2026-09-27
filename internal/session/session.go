@@ -7,6 +7,7 @@ import (
 	"image"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -147,6 +148,12 @@ type Session struct {
 	// wait behind one another.
 	frames       chan *image.RGBA
 	screenFrames chan *image.RGBA
+	// localFrames carries this side's own camera, straight from the device, on
+	// the same terms — what a picture-in-picture paints. It never goes near
+	// the wire. localWatched is whether any UI has asked for it: a terminal
+	// that paints no local picture should not pay for one to be made.
+	localFrames  chan *image.RGBA
+	localWatched atomic.Bool
 	// remoteMedia is the other side's last announced stream state, held so
 	// that one that arrives before this side is Active is not lost.
 	remoteMedia     MediaChanged
@@ -200,6 +207,7 @@ func New(opts Options) (*Session, error) {
 
 		frames:       make(chan *image.RGBA, 1),
 		screenFrames: make(chan *image.RGBA, 1),
+		localFrames:  make(chan *image.RGBA, 1),
 	}, nil
 }
 

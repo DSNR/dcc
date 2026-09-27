@@ -105,6 +105,59 @@ func Delivery(status session.DeliveryStatus) string {
 	return ""
 }
 
+// CallReason is why a Call ended, in words, and "" for any other transition.
+// Why a Call ended is the whole of what somebody wants to know the moment one
+// does, so both clients say it the same way — what to press or type next is
+// each client's own business.
+func CallReason(reason session.CallReason, peer string) string {
+	switch reason {
+	case session.CallDeclined:
+		return Quoted(peer) + " turned the Call down."
+	case session.CallBusy:
+		return Quoted(peer) + " is already in a Call."
+	case session.CallTimedOut:
+		return "The Call rang out unanswered."
+	case session.CallEnded:
+		return "The Call ended. You are still connected for text."
+	case session.CallLost:
+		return "The Call dropped with the connection. Call again once you are back."
+	case session.CallFailed:
+		return "The Call could not be set up — no media path came together."
+	}
+	return ""
+}
+
+// Mic is the other side's microphone changing state. Muting is worth saying out
+// loud: silence that is deliberate and silence that is broken sound exactly the
+// same.
+func Mic(live bool, peer string) string {
+	if live {
+		return Quoted(peer) + " unmuted."
+	}
+	return Quoted(peer) + " muted their microphone."
+}
+
+// Cam is the other side's camera changing state, for the same reason: a black
+// picture and a camera nobody turned on look identical.
+func Cam(live bool, peer string) string {
+	if live {
+		return Quoted(peer) + " turned their camera on."
+	}
+	return Quoted(peer) + " turned their camera off."
+}
+
+// Share is the other side starting or stopping a screen share, which is worth
+// saying out loud for the same reason the camera is: a picture quietly
+// changing into somebody's desktop is not something anyone should have to work
+// out for themselves. Where it appears is the one part the two clients differ
+// on, so each names its own place for it.
+func Share(live bool, peer, where string) string {
+	if live {
+		return Quoted(peer) + " is sharing their screen — it is in " + where + "."
+	}
+	return Quoted(peer) + " stopped sharing their screen."
+}
+
 // SecurityCode is the record a Security Code prompt leaves behind it: the
 // code in the groups it is meant to be read in, and who is claiming it. The
 // question itself is not here — how a client asks it, and how it stops asking

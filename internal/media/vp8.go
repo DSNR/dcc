@@ -142,13 +142,10 @@ func (d *decoder) decode(frame []byte) (*image.RGBA, error) {
 // close releases the decoder.
 func (d *decoder) close() error { return d.dec.Close() }
 
-// rgba converts one decoded I420 frame to RGBA. The image is freshly
-// allocated on every frame: the decoder's own planes are overwritten by the
-// next frame, and a UI holding a picture that changes underneath it would
-// tear. RGBA is what both UIs upload to the GPU.
+// rgba converts one decoded I420 frame to RGBA, which is what both UIs upload
+// to the GPU.
 func rgba(img govpx.Image) *image.RGBA {
-	out := image.NewRGBA(image.Rect(0, 0, img.Width, img.Height))
-	I420ToRGBA(Picture{
+	return Picture{
 		Width:   img.Width,
 		Height:  img.Height,
 		Y:       img.Y,
@@ -157,6 +154,5 @@ func rgba(img govpx.Image) *image.RGBA {
 		YStride: img.YStride,
 		UStride: img.UStride,
 		VStride: img.VStride,
-	}, out)
-	return out
+	}.RGBA()
 }

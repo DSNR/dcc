@@ -67,6 +67,17 @@ shown. Enter sends, shift+enter starts a line. **History** opens the panel of
 Conversations stored on this device, each of which can be read back with
 nobody connected and deleted from this device alone.
 
+**Call** rings the other person, **Answer** and **Reject** are the two ways out
+of a Call ringing here, and **Hang up** ends one and leaves the Session
+connected for text. Inside a Call, **Mute**, **Camera on** and **Share
+screen** control what this side sends, and each is announced to the other side
+— nobody should have to wonder whether their desktop is still being watched.
+The Call's video is in the window itself, above the conversation: the other
+person large — their shared screen while they are sharing one, their camera
+otherwise — with this side's own camera in the corner, so that what is being
+sent is always in front of the person sending it. Windows receives video but
+does not send it, the same as `dcc-cli`.
+
 Emoji are typed the way the operating system types them — the compose key, the
 Windows emoji panel, a paste — and rendered through a bundled monochrome Noto
 Emoji, which is the fallback the Go fonts do not carry. There is no picker

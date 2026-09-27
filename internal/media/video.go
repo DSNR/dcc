@@ -79,6 +79,14 @@ type StreamOptions struct {
 	// goroutine that delivered it. The image is the caller's to keep.
 	// Required.
 	Frame func(img *image.RGBA)
+	// Preview takes one frame of this side's own stream, on the capture
+	// goroutine, as the device delivered it and before anything is encoded —
+	// which is what a local picture-in-picture paints. The Picture's planes
+	// belong to the device and are overwritten by the next frame, so a
+	// preview that keeps one converts it first: Picture.RGBA is that
+	// conversion, and leaving it uncalled is what makes a preview nobody is
+	// watching cost nothing but the call. Nil means no preview at all.
+	Preview func(pic Picture)
 	// NeedKeyframe asks the other side to send a keyframe, because nothing
 	// arriving here can be decoded without one. Nil means never asking,
 	// which leaves a stream that lost its reference frames black.
@@ -181,6 +189,7 @@ type stream struct {
 
 	send    func([]byte, time.Duration)
 	frame   func(*image.RGBA)
+	preview func(Picture)
 	need    func()
 	stopped func()
 
@@ -219,6 +228,7 @@ func newStream(name string, open func() (Camera, error), fps, bitrate int, opts 
 		bitrate: bitrate,
 		send:    opts.Send,
 		frame:   opts.Frame,
+		preview: opts.Preview,
 		need:    opts.NeedKeyframe,
 		stopped: opts.Stopped,
 	}
@@ -401,6 +411,12 @@ func (s *stream) capture(dev Camera, enc *encoder, first Picture, done chan<- st
 	duration := s.frameDuration()
 	pic, err := first, error(nil)
 	for {
+		// The preview goes first, so that turning a camera on shows this side
+		// a picture of itself whether or not the encoder ever makes anything
+		// of it.
+		if s.preview != nil {
+			s.preview(pic)
+		}
 		frame, encodeErr := enc.encode(pic, s.force.Swap(false))
 		if encodeErr != nil {
 			// The encoder has given up on this stream. The Call carries on

@@ -104,6 +104,61 @@ func states() []state {
 	closing.Closing = true
 	closing.Controls = gui.Controls{}
 
+	// The Call, from ringing to a picture in the window. The two frames are
+	// blank — what matters here is that a picture and a picture-in-picture are
+	// laid out at all, not what is in them.
+	remote := image.NewRGBA(image.Rect(0, 0, 640, 480))
+	local := image.NewRGBA(image.Rect(0, 0, 320, 240))
+
+	ringing := connected
+	ringing.Call = gui.Call{State: session.Ringing, Status: `Calling "Ada"…`}
+	ringing.Controls.Hangup = true
+	ringing.Controls.Mute = true
+
+	incoming := connected
+	incoming.Call = gui.Call{State: session.Incoming, Status: `"Ada" is calling`}
+	incoming.Controls.Answer = true
+	incoming.Controls.Reject = true
+	incoming.Controls.Hangup = true
+	incoming.Controls.Mute = true
+
+	negotiating := connected
+	negotiating.Call = gui.Call{State: session.Negotiating, Status: "Setting the Call up…"}
+	negotiating.Controls.Hangup = true
+	negotiating.Controls.Mute = true
+
+	live := gui.Controls{Send: true, Disconnect: true, Hangup: true, Mute: true, Camera: true, Share: true}
+
+	audioOnly := connected
+	audioOnly.Call = gui.Call{
+		State:    session.Active,
+		Status:   "In a Call · you are muted",
+		Muted:    true,
+		TheirMic: true,
+		Waiting:  "No video — their camera is off. Turn yours on with Camera, or ask them for theirs.",
+	}
+	audioOnly.Controls = live
+
+	onVideo := connected
+	onVideo.Call = gui.Call{
+		State:    session.Active,
+		Status:   "In a Call · your camera is on · their camera is on",
+		CameraOn: true,
+		TheirMic: true,
+		TheirCam: true,
+		Large:    remote,
+		Small:    local,
+	}
+	onVideo.Controls = live
+
+	sharing := onVideo
+	sharing.Call.Sharing = true
+	sharing.Call.TheirScreen = true
+	sharing.Call.Status = "In a Call · you are sharing your screen · they are sharing their screen"
+
+	onVideoWithHistory := onVideo
+	onVideoWithHistory.Conversations = conversations
+
 	return []state{
 		{name: "idle", screen: idle},
 		{name: "idle with the history panel open", screen: idle, history: true},
@@ -114,6 +169,13 @@ func states() []state {
 		{name: "history listed", screen: withHistory, history: true},
 		{name: "a delete being confirmed", screen: withHistory, history: true, clearing: true},
 		{name: "closing", screen: closing},
+		{name: "a Call ringing out", screen: ringing},
+		{name: "a Call ringing here", screen: incoming},
+		{name: "a Call coming up", screen: negotiating},
+		{name: "a Call with no video", screen: audioOnly},
+		{name: "a Call with video and a picture-in-picture", screen: onVideo},
+		{name: "a Call with screens shared both ways", screen: sharing},
+		{name: "a Call beside the history panel", screen: onVideoWithHistory, history: true},
 	}
 }
 

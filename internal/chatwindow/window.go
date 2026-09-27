@@ -9,6 +9,7 @@
 package chatwindow
 
 import (
+	"image"
 	"image/color"
 	"io"
 	"strings"
@@ -88,6 +89,10 @@ type ui struct {
 	send, copy, panel         widget.Clickable
 	accept, refuse            widget.Clickable
 	confirm, cancel           widget.Clickable
+	// The Call's own controls, which are on screen whether or not there is a
+	// Call — greyed, like every other control that would do nothing.
+	call, answer, reject, hangup widget.Clickable
+	mute, camera, share          widget.Clickable
 
 	// rows are the history panel's per-Conversation buttons, kept by Peer so
 	// that a list that changes under them cannot hand a click to the wrong
@@ -214,6 +219,7 @@ func (u *ui) acted(gtx layout.Context, s gui.Screen) {
 			u.model.RefreshHistory()
 		}
 	}
+	u.actedOnCall(gtx, s)
 	if s.Prompt != nil {
 		if u.accept.Clicked(gtx) {
 			u.model.Accept()
@@ -223,6 +229,33 @@ func (u *ui) acted(gtx layout.Context, s gui.Screen) {
 		}
 	}
 	u.actedOnHistory(gtx, s)
+}
+
+// actedOnCall is the Call bar's clicks. The three toggles ask for the opposite
+// of what the Screen they were drawn from said, which is what their labels
+// promised.
+func (u *ui) actedOnCall(gtx layout.Context, s gui.Screen) {
+	if u.call.Clicked(gtx) && s.Controls.Call {
+		u.model.Call()
+	}
+	if u.answer.Clicked(gtx) && s.Controls.Answer {
+		u.model.Answer()
+	}
+	if u.reject.Clicked(gtx) && s.Controls.Reject {
+		u.model.Reject()
+	}
+	if u.hangup.Clicked(gtx) && s.Controls.Hangup {
+		u.model.Hangup()
+	}
+	if u.mute.Clicked(gtx) && s.Controls.Mute {
+		u.model.Mute(!s.Call.Muted)
+	}
+	if u.camera.Clicked(gtx) && s.Controls.Camera {
+		u.model.Camera(!s.Call.CameraOn)
+	}
+	if u.share.Clicked(gtx) && s.Controls.Share {
+		u.model.Share(!s.Call.Sharing)
+	}
 }
 
 // actedOnHistory is the history panel's clicks: opening a Conversation, and
@@ -290,7 +323,12 @@ var (
 	mutedBg  = color.NRGBA{R: 0xC4, G: 0xC8, B: 0xD0, A: 0xFF}
 	mutedFg  = color.NRGBA{R: 0x6A, G: 0x6F, B: 0x78, A: 0xFF}
 	noticeFg = color.NRGBA{R: 0x50, G: 0x55, B: 0x60, A: 0xFF}
-	stampFg  = color.NRGBA{R: 0x8A, G: 0x8F, B: 0x98, A: 0xFF}
+	// Video is painted on black, so that a picture which does not fill its
+	// area is letterboxed rather than showing whatever was behind it, and
+	// whatever is said in place of a picture is said in light on dark.
+	videoBg = color.NRGBA{A: 0xFF}
+	videoFg = color.NRGBA{R: 0xD0, G: 0xD4, B: 0xDC, A: 0xFF}
+	stampFg = color.NRGBA{R: 0x8A, G: 0x8F, B: 0x98, A: 0xFF}
 )
 
 // pad is the window's one spacing unit.
@@ -306,12 +344,32 @@ func (u *ui) layout(gtx layout.Context, s gui.Screen) layout.Dimensions {
 			return u.controls(gtx, s)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.callBar(gtx, s)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return u.inviteBar(gtx, s)
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					return u.entries(gtx, s)
+					// A Call's video and the conversation share the middle of
+					// the window: the video is what someone in a Call is
+					// looking at, and the conversation is what they are still
+					// able to read.
+					if !s.Call.Video() {
+						return u.entries(gtx, s)
+					}
+					// The video takes the larger share: somebody in a Call
+					// is looking at the other person, and reading the
+					// conversation beside them.
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Flexed(3, func(gtx layout.Context) layout.Dimensions {
+							return u.video(gtx, s.Call)
+						}),
+						layout.Flexed(2, func(gtx layout.Context) layout.Dimensions {
+							return u.entries(gtx, s)
+						}),
+					)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return u.historyPanel(gtx, s)
@@ -368,6 +426,109 @@ func (u *ui) historyLabel() string {
 		return "Hide history"
 	}
 	return "History"
+}
+
+// callBar is the Call: where it stands, and every button that starts, answers
+// or changes one. Like the top bar it shows all of them at all times, so that
+// what a Call can do is visible rather than remembered.
+func (u *ui) callBar(gtx layout.Context, s gui.Screen) layout.Dimensions {
+	c := s.Call
+	return bar(gtx, barBg, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(material.Body2(u.th, c.Status).Layout),
+			layout.Rigid(layout.Spacer{Height: pad}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					u.callButton(&u.call, "Call", s.Controls.Call, u.th.ContrastBg),
+					layout.Rigid(layout.Spacer{Width: pad}.Layout),
+					u.callButton(&u.answer, "Answer", s.Controls.Answer, u.th.ContrastBg),
+					layout.Rigid(layout.Spacer{Width: pad}.Layout),
+					u.callButton(&u.reject, "Reject", s.Controls.Reject, dangerBg),
+					layout.Rigid(layout.Spacer{Width: pad}.Layout),
+					u.callButton(&u.hangup, "Hang up", s.Controls.Hangup, dangerBg),
+					layout.Rigid(layout.Spacer{Width: pad}.Layout),
+					u.callButton(&u.mute, c.MuteLabel(), s.Controls.Mute, u.th.ContrastBg),
+					layout.Rigid(layout.Spacer{Width: pad}.Layout),
+					u.callButton(&u.camera, c.CameraLabel(), s.Controls.Camera, u.th.ContrastBg),
+					layout.Rigid(layout.Spacer{Width: pad}.Layout),
+					u.callButton(&u.share, c.ShareLabel(), s.Controls.Share, u.th.ContrastBg),
+				)
+			}),
+		)
+	})
+}
+
+// callButton is one of the Call bar's buttons as a flex child, which is the
+// only way seven of them fit on one line without seven closures.
+func (u *ui) callButton(click *widget.Clickable, label string, live bool, bg color.NRGBA) layout.FlexChild {
+	return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		return u.button(gtx, click, label, live, bg)
+	})
+}
+
+// video is the Call's pictures: the other side large — their shared screen
+// while they are sharing one, their camera otherwise — and this side's own
+// camera in the corner, so that what the other person is being shown is always
+// in front of the person sending it.
+func (u *ui) video(gtx layout.Context, c gui.Call) layout.Dimensions {
+	return layout.Stack{Alignment: layout.SE}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			paint.Fill(gtx.Ops, videoBg)
+			if c.Large == nil {
+				return u.waiting(gtx, c.Waiting)
+			}
+			return u.picture(gtx, c.Large)
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if c.Small == nil {
+				return layout.Dimensions{}
+			}
+			return layout.UniformInset(pad).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				gtx.Constraints = layout.Exact(pipSize(gtx.Constraints.Max, c.Small))
+				return u.picture(gtx, c.Small)
+			})
+		}),
+	)
+}
+
+// picture paints one frame, one ImageOp per frame, letterboxed inside whatever
+// space it was given: a picture is as big as it can be without being stretched
+// into the wrong shape.
+func (u *ui) picture(gtx layout.Context, img *image.RGBA) layout.Dimensions {
+	return widget.Image{
+		Src:      paint.NewImageOp(img),
+		Fit:      widget.Contain,
+		Position: layout.Center,
+		Scale:    1 / gtx.Metric.PxPerDp,
+	}.Layout(gtx)
+}
+
+// waiting is what the video area says when there is no picture in it, centred
+// where the picture would have been.
+func (u *ui) waiting(gtx layout.Context, said string) layout.Dimensions {
+	return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.UniformInset(pad).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			l := material.Body2(u.th, said)
+			l.Color = videoFg
+			l.Alignment = text.Middle
+			return l.Layout(gtx)
+		})
+	})
+}
+
+// pipSize is how big the picture-in-picture is: a quarter of the area across,
+// in the picture's own shape, and never bigger than the space it sits in — a
+// thumbnail that grew to fill a small window would be hiding the person it is
+// a thumbnail beside.
+func pipSize(space image.Point, img *image.RGBA) image.Point {
+	bounds := img.Bounds()
+	width := min(max(space.X/4, 1), space.X)
+	height := width * bounds.Dy() / max(bounds.Dx(), 1)
+	if height > space.Y {
+		height = space.Y
+		width = min(height*bounds.Dx()/max(bounds.Dy(), 1), space.X)
+	}
+	return image.Pt(width, max(height, 1))
 }
 
 // inviteBar is the Invite, once there is one to hand over: the string in full

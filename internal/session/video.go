@@ -61,6 +61,21 @@ func (s *Session) Frames() <-chan *image.RGBA { return s.frames }
 // neither should wait for the other.
 func (s *Session) ScreenFrames() <-chan *image.RGBA { return s.screenFrames }
 
+// LocalFrames is this side's own camera, as the device delivered it and before
+// anything was encoded — the picture-in-picture a UI paints beside the other
+// person. It is delivered on the same terms as Frames: newest picture only,
+// never closed, and nothing at all while this side's camera is off. Nothing on
+// it has been near the wire.
+//
+// Asking is what starts it: a captured frame is only turned into a picture for
+// a UI that has called this, so a terminal that paints no local picture pays
+// nothing for one. A UI that asks while a camera is already running starts
+// seeing it from the next frame.
+func (s *Session) LocalFrames() <-chan *image.RGBA {
+	s.localWatched.Store(true)
+	return s.localFrames
+}
+
 // videoStream names which of a Call's two video streams a command is about.
 // The two are identical in shape — open a device, send it, say so — and differ
 // only in what they are called and which flags they set, so they share one
@@ -169,6 +184,7 @@ func (s *Session) startVideoLocked(gen int) {
 		Camera: media.StreamOptions{
 			Send:         func(frame []byte, d time.Duration) { s.sendVideo(gen, frame, d) },
 			Frame:        s.deliverFrame,
+			Preview:      s.deliverLocalFrame,
 			NeedKeyframe: func() { s.requestKeyframe(gen) },
 			Stopped:      func() { s.streamStopped(gen, streamCamera) },
 		},
@@ -308,6 +324,18 @@ func (s *Session) deliverFrame(img *image.RGBA) { newest(s.frames, img) }
 
 // deliverScreenFrame does the same for the other side's shared screen.
 func (s *Session) deliverScreenFrame(img *image.RGBA) { newest(s.screenFrames, img) }
+
+// deliverLocalFrame does the same for this side's own camera, and only for a
+// UI that asked for it: converting a captured frame costs a full picture's
+// worth of work, fifteen times a second, and a terminal that paints no local
+// picture should not pay it. There is no local preview of a shared screen —
+// whoever is sharing one is looking at it.
+func (s *Session) deliverLocalFrame(pic media.Picture) {
+	if !s.localWatched.Load() {
+		return
+	}
+	newest(s.localFrames, pic.RGBA())
+}
 
 // newest replaces whatever is waiting on a one-deep frame channel.
 func newest(frames chan *image.RGBA, img *image.RGBA) {

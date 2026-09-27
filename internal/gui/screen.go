@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"image"
 	"time"
 
 	"github.com/DSNR/dcc/internal/identity"
@@ -77,6 +78,42 @@ func conversation(c storage.Conversation) Conversation {
 	return Conversation{Peer: c.Peer, Name: c.Name, Summary: words.Stored(c.Messages, c.LastAt)}
 }
 
+// Call is the Call inside the Session as the window shows it: where it
+// stands, what each side has turned on, and the pictures to paint. A Session
+// carrying nothing but text has one of these too, in state NoCall — the Call
+// controls are on screen whether or not there is a Call, greyed like every
+// other control that would do nothing.
+type Call struct {
+	// State is where the Call stands.
+	State session.CallState
+	// Status is the Call in one line, for the bar the Call's buttons are on.
+	Status string
+	// Muted, CameraOn and Sharing are this side's own streams, as the Session
+	// answers for them — a camera that was unplugged reads as off here, the
+	// same as one that was turned off.
+	Muted, CameraOn, Sharing bool
+	// TheirMic, TheirCam and TheirScreen are the other side's streams, as
+	// they last announced them.
+	TheirMic, TheirCam, TheirScreen bool
+	// Large is the picture that fills the video area: the other side's shared
+	// screen while they are sharing one, their camera otherwise. Nil when
+	// there is no picture to paint, and then Waiting says why.
+	Large *image.RGBA
+	// Small is this side's own camera, the picture-in-picture. Nil while this
+	// side's camera is off, because a corner showing a frozen last frame is
+	// worse than an empty one.
+	Small *image.RGBA
+	// Waiting is what to say where a Large picture would be, and "" when
+	// there is one to paint instead.
+	Waiting string
+}
+
+// Video reports a Call with a video area to show. It opens with the Call
+// itself — Active — whether or not anybody has turned a camera on yet, and not
+// while the media is still coming up: a video area that appeared halfway
+// through would move the conversation out from under whoever was reading it.
+func (c Call) Video() bool { return c.State == session.Active }
+
 // Controls is which of the window's buttons can be pressed right now. The
 // window shows every control it has at all times and greys out the ones that
 // would do nothing, so that what dcc can do is visible without a manual.
@@ -90,6 +127,14 @@ type Controls struct {
 	Send bool
 	// Disconnect ends the running Session.
 	Disconnect bool
+	// Call rings the other person, and needs a Connected Session with no Call
+	// already running. Answer and Reject are the two ways out of one ringing
+	// here, and Hangup ends whichever Call there is.
+	Call, Answer, Reject, Hangup bool
+	// Mute is available for as long as there is a Call at all; Camera and
+	// Share need one whose media is up, because there is nothing to open a
+	// device into until then.
+	Mute, Camera, Share bool
 }
 
 // Screen is one snapshot of the window: everything the Gio layer paints, and
@@ -110,6 +155,8 @@ type Screen struct {
 	Invite string
 	// Prompt is the standing Security Code prompt, nil when none stands.
 	Prompt *Prompt
+	// Call is the Call inside the Session, and the pictures it carries.
+	Call Call
 	// Conversations is what the history panel lists.
 	Conversations []Conversation
 	// Controls is which buttons are live.

@@ -570,15 +570,15 @@ func (m *Model) apply(e session.Event) tea.Cmd {
 	case session.MediaChanged:
 		if m.remoteMic != e.Mic {
 			m.remoteMic = e.Mic
-			m.add(notice(micNotice(e.Mic, m.peerName())))
+			m.add(notice(words.Mic(e.Mic, m.peerName())))
 		}
 		if m.remoteCam != e.Cam {
 			m.remoteCam = e.Cam
-			m.add(notice(camNotice(e.Cam, m.peerName())))
+			m.add(notice(words.Cam(e.Cam, m.peerName())))
 		}
 		if m.remoteScreen != e.Screen {
 			m.remoteScreen = e.Screen
-			m.add(notice(shareNotice(e.Screen, m.peerName())))
+			m.add(notice(words.Share(e.Screen, m.peerName(), "the video window")))
 			// The window shows one thing at a time, and while they are sharing
 			// that thing is their screen.
 			if m.video != nil {

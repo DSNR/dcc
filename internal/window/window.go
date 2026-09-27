@@ -50,8 +50,10 @@ type Options struct {
 // on Screen, while a share is running — and stops when it is closed, from here
 // or by the person clicking the close box.
 //
-// It shows the other side's video, full window. The local picture-in-picture
-// ADR 0003 describes is the GUI's, and arrives with it.
+// It shows the other side's video, full window. The local thumbnail overlay
+// ADR 0003 describes for this window is not built yet — internal/chatwindow
+// paints one, and a Session hands out the frames for it, so what is left here
+// is painting them: see #32.
 type Window struct {
 	win *app.Window
 	// stop is closed by Close; done closes when the window's event loop has

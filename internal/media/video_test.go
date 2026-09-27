@@ -17,6 +17,9 @@ type seen struct {
 	mu     sync.Mutex
 	frames [][]byte
 	shown  []*image.RGBA
+	// mine is what the preview handed over: this side's own pictures, as
+	// opposed to shown, which is the other side's.
+	mine   []*image.RGBA
 	wanted int
 }
 
@@ -30,6 +33,12 @@ func (s *seen) show(img *image.RGBA) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.shown = append(s.shown, img)
+}
+
+func (s *seen) preview(pic media.Picture) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mine = append(s.mine, pic.RGBA())
 }
 
 func (s *seen) needKeyframe() {
@@ -48,6 +57,12 @@ func (s *seen) pictures() []*image.RGBA {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]*image.RGBA(nil), s.shown...)
+}
+
+func (s *seen) previews() []*image.RGBA {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*image.RGBA(nil), s.mine...)
 }
 
 func (s *seen) asked() int {
@@ -118,6 +133,55 @@ func TestVideoCameraOnAndOff(t *testing.T) {
 		t.Fatalf("Camera(true) again: %v", err)
 	}
 	waitVideo(t, &got, quiet+2)
+}
+
+// TestVideoPreviewsThisSideOwnCamera proves the preview is this side's own
+// picture, taken at the device rather than round the loop: it arrives while the
+// camera is on, in the camera's own tint and at its own size, and stops when
+// the camera does.
+func TestVideoPreviewsThisSideOwnCamera(t *testing.T) {
+	tint := color.RGBA{R: 30, G: 90, B: 200, A: 0xFF}
+	var got seen
+	opts := cameraOnly(&media.Fake{Tint: tint}, &got)
+	opts.Camera.Preview = got.preview
+	video, err := media.StartVideo(opts)
+	if err != nil {
+		t.Fatalf("StartVideo: %v", err)
+	}
+	defer video.Close()
+
+	time.Sleep(3 * media.VideoFrameDuration)
+	if shown := got.previews(); len(shown) != 0 {
+		t.Fatalf("%d pictures were previewed with the camera off", len(shown))
+	}
+
+	if err := video.Camera(true); err != nil {
+		t.Fatalf("Camera(true): %v", err)
+	}
+	waitVideo(t, &got, 3)
+
+	previewed := got.previews()
+	if len(previewed) == 0 {
+		t.Fatal("a camera that is on previewed nothing")
+	}
+	first := previewed[0]
+	if w, h := first.Bounds().Dx(), first.Bounds().Dy(); w != media.VideoWidth || h != media.VideoHeight {
+		t.Errorf("previewed a %dx%d picture, want %dx%d", w, h, media.VideoWidth, media.VideoHeight)
+	}
+	// Nothing is encoded on the way to a preview, so the tint arrives almost
+	// exactly — only the sweeping bar is anything else.
+	if share := media.Tinted(first, tint); share < 0.85 {
+		t.Errorf("only %.0f%% of the previewed picture is the camera's tint", share*100)
+	}
+
+	if err := video.Camera(false); err != nil {
+		t.Fatalf("Camera(false): %v", err)
+	}
+	quiet := len(got.previews())
+	time.Sleep(5 * media.VideoFrameDuration)
+	if shown := got.previews(); len(shown) != quiet {
+		t.Errorf("a camera that is off previewed %d more pictures", len(shown)-quiet)
+	}
 }
 
 // TestVideoRoundTrip proves what one side's camera sends is what the other

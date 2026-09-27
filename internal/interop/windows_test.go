@@ -7,6 +7,7 @@ import (
 
 	"github.com/DSNR/dcc/internal/gui"
 	"github.com/DSNR/dcc/internal/identity"
+	"github.com/DSNR/dcc/internal/media"
 	"github.com/DSNR/dcc/internal/rendezvous"
 	"github.com/DSNR/dcc/internal/session"
 )
@@ -18,8 +19,8 @@ import (
 // Session expects — and, because dcc-cli drives the same API, that a window
 // and a terminal can hold the same Conversation.
 func TestTwoWindowsTalk(t *testing.T) {
-	host := newLive(t, "Ada")
-	peer := newLive(t, "Grace")
+	host := newLive(t, "Ada", nil)
+	peer := newLive(t, "Grace", nil)
 
 	host.Host()
 	s := waitFor(t, host, "the Invite", func(s gui.Screen) bool { return s.Invite != "" })
@@ -63,9 +64,17 @@ const waitTimeout = 10 * time.Second
 // tick is how long a wait sleeps between looks.
 const tick = time.Millisecond
 
+// mediaWait is how long a Call's pictures are given. It is far longer than
+// waitTimeout, because a picture has to be captured, encoded, sent, decoded
+// and delivered before anything can assert on it, and a pure-Go VP8 encoder
+// under the race detector takes its time.
+const mediaWait = 60 * time.Second
+
 // newLive builds a window over real Sessions on a loopback Rendezvous — no
-// cloudflared, no Cloudflare account, everything else real.
-func newLive(t *testing.T, name string) *gui.Model {
+// cloudflared, no Cloudflare account, everything else real. Nil devices means
+// a window that will never be in a Call; a media.Fake is what stands in for a
+// microphone, a camera and a display where one is.
+func newLive(t *testing.T, name string, devices media.Devices) *gui.Model {
 	t.Helper()
 	id, _, err := identity.Load(t.TempDir())
 	if err != nil {
@@ -78,6 +87,7 @@ func newLive(t *testing.T, name string) *gui.Model {
 				Identity: id,
 				Name:     name,
 				Tunnel:   rendezvous.Loopback{},
+				Devices:  devices,
 			})
 		},
 	})

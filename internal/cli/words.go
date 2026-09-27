@@ -36,22 +36,12 @@ var helpLines = []string{
 }
 
 // callNotice is what a Call transition is worth saying in the conversation.
-// The reason comes first: why a Call ended is the whole of what someone
-// wants to know when it does.
+// The reason comes first — why a Call ended is the whole of what someone wants
+// to know when it does, and both clients say that the same way; what is left
+// here is what to type next, which is this client's alone.
 func callNotice(e session.CallChanged, peer string) string {
-	switch e.Reason {
-	case session.CallDeclined:
-		return words.Quoted(peer) + " turned the Call down."
-	case session.CallBusy:
-		return words.Quoted(peer) + " is already in a Call."
-	case session.CallTimedOut:
-		return "The Call rang out unanswered."
-	case session.CallEnded:
-		return "The Call ended. You are still connected for text."
-	case session.CallLost:
-		return "The Call dropped with the connection. Call again once you are back."
-	case session.CallFailed:
-		return "The Call could not be set up — no media path came together."
+	if said := words.CallReason(e.Reason, peer); said != "" {
+		return said
 	}
 	switch e.State {
 	case session.Incoming:
@@ -63,35 +53,6 @@ func callNotice(e session.CallChanged, peer string) string {
 	}
 	// Ringing is announced by the command that caused it.
 	return ""
-}
-
-// micNotice is the other side's microphone changing state. Muting is worth
-// saying out loud: silence that is deliberate and silence that is broken
-// sound exactly the same.
-func micNotice(live bool, peer string) string {
-	if live {
-		return words.Quoted(peer) + " unmuted."
-	}
-	return words.Quoted(peer) + " muted their microphone."
-}
-
-// camNotice is the other side's camera changing state, for the same reason: a
-// black video window and a camera nobody turned on look identical.
-func camNotice(live bool, peer string) string {
-	if live {
-		return words.Quoted(peer) + " turned their camera on."
-	}
-	return words.Quoted(peer) + " turned their camera off."
-}
-
-// shareNotice is the other side starting or stopping a share, for the same
-// reason again: the video window quietly changing what it is showing is not
-// something anyone should have to work out for themselves.
-func shareNotice(live bool, peer string) string {
-	if live {
-		return words.Quoted(peer) + " is sharing their screen — it is in the video window."
-	}
-	return words.Quoted(peer) + " stopped sharing their screen."
 }
 
 // promptRecord is what a Security Code prompt leaves in the conversation: the

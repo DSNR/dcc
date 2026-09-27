@@ -4,7 +4,9 @@
 // of its own. That is the same relationship to the core that internal/cli
 // has, so the two clients cannot drift apart on anything that matters.
 //
-// Model is the client; Screen is one snapshot of what should be on display.
+// Model is the client; Screen is one snapshot of what should be on display,
+// a Call's pictures included — the newest frame of each of its three streams,
+// so that painting them is a matter of one ImageOp each and no waiting.
 // internal/chatwindow paints a Screen in Gio and calls Model's methods, and
 // nothing else — so what a participant sees and what a click does are
 // testable here without a display, and without the cgo and display headers a

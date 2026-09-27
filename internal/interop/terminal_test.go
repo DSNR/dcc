@@ -12,6 +12,7 @@ import (
 	"github.com/DSNR/dcc/internal/cli"
 	"github.com/DSNR/dcc/internal/gui"
 	"github.com/DSNR/dcc/internal/identity"
+	"github.com/DSNR/dcc/internal/media"
 	"github.com/DSNR/dcc/internal/rendezvous"
 	"github.com/DSNR/dcc/internal/session"
 )
@@ -28,8 +29,8 @@ func TestMain(m *testing.M) {
 // ways over a real handshake and a real DataChannel. Neither client has any
 // networking of its own — this is what that claim means in practice.
 func TestWindowTalksToTerminal(t *testing.T) {
-	window := newLive(t, "Ada")
-	terminal := newTerminal(t, "Grace")
+	window := newLive(t, "Ada", nil)
+	terminal := newTerminal(t, "Grace", nil)
 
 	window.Host()
 	s := waitFor(t, window, "the Invite", func(s gui.Screen) bool { return s.Invite != "" })
@@ -66,8 +67,10 @@ type terminal struct {
 }
 
 // newTerminal starts a terminal client over a real Session on the loopback
-// Rendezvous.
-func newTerminal(t *testing.T, name string) *terminal {
+// Rendezvous. Nil devices means a terminal that will never be in a Call; a
+// media.Fake is what stands in for a microphone, a camera and a display where
+// one is.
+func newTerminal(t *testing.T, name string, devices media.Devices) *terminal {
 	t.Helper()
 	id, _, err := identity.Load(t.TempDir())
 	if err != nil {
@@ -81,6 +84,7 @@ func newTerminal(t *testing.T, name string) *terminal {
 				Identity: id,
 				Name:     name,
 				Tunnel:   rendezvous.Loopback{},
+				Devices:  devices,
 			})
 		},
 	})
@@ -152,7 +156,18 @@ func (h *terminal) see(t *testing.T, fragment string) {
 // kept moving.
 func (h *terminal) waitFor(t *testing.T, what string, want func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(waitTimeout)
+	h.wait(t, waitTimeout, what, want)
+}
+
+// waitForMedia is waitFor with a Call's media given the time it needs.
+func (h *terminal) waitForMedia(t *testing.T, what string, want func() bool) {
+	t.Helper()
+	h.wait(t, mediaWait, what, want)
+}
+
+func (h *terminal) wait(t *testing.T, bound time.Duration, what string, want func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(bound)
 	for {
 		if want() {
 			return

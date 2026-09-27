@@ -3,6 +3,7 @@ package gui_test
 import (
 	"context"
 	"errors"
+	"image"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,12 @@ var testPeer = identity.PublicKey{1, 2, 3}
 // PeerConnection underneath it.
 type fakeSession struct {
 	events chan session.Event
+	// frames, screens and local are the three picture channels a Call
+	// delivers: the other side's camera, their shared screen, and this side's
+	// own camera.
+	frames  chan *image.RGBA
+	screens chan *image.RGBA
+	local   chan *image.RGBA
 
 	mu      sync.Mutex
 	hosts   int
@@ -49,13 +56,26 @@ type fakeSession struct {
 	sent    []string
 	closes  int
 
+	// The Call half: what the window asked of a Call, and what this side's
+	// streams are as a result.
+	calls, answers, rejects, hangups int
+	muted, cameraOn, sharing         bool
+	cameraAsks, shareAsks            []bool
+
 	// hostErr, joinErr, sendErr and acceptErr are what the next matching
 	// command returns; zero means it succeeds.
 	hostErr, joinErr, sendErr, acceptErr error
+	// callErr, cameraErr and shareErr are the same for the Call controls.
+	callErr, cameraErr, shareErr error
 }
 
 func newFake() *fakeSession {
-	return &fakeSession{events: make(chan session.Event, 64)}
+	return &fakeSession{
+		events:  make(chan session.Event, 64),
+		frames:  make(chan *image.RGBA, 1),
+		screens: make(chan *image.RGBA, 1),
+		local:   make(chan *image.RGBA, 1),
+	}
 }
 
 func (f *fakeSession) Events() <-chan session.Event { return f.events }
@@ -100,6 +120,126 @@ func (f *fakeSession) SendText(body string) (string, error) {
 	f.sent = append(f.sent, body)
 	return "msg-" + body, nil
 }
+
+func (f *fakeSession) Call() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.callErr != nil {
+		return "", f.callErr
+	}
+	f.calls++
+	return testCallID, nil
+}
+
+func (f *fakeSession) Answer() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.answers++
+	return nil
+}
+
+func (f *fakeSession) Reject() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rejects++
+	return nil
+}
+
+func (f *fakeSession) Hangup() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hangups++
+	return nil
+}
+
+func (f *fakeSession) Mute(muted bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.muted = muted
+	return nil
+}
+
+func (f *fakeSession) Muted() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.muted
+}
+
+func (f *fakeSession) Camera(on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cameraAsks = append(f.cameraAsks, on)
+	if f.cameraErr != nil {
+		return f.cameraErr
+	}
+	f.cameraOn = on
+	return nil
+}
+
+func (f *fakeSession) CameraOn() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cameraOn
+}
+
+func (f *fakeSession) Share(on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.shareAsks = append(f.shareAsks, on)
+	if f.shareErr != nil {
+		return f.shareErr
+	}
+	f.sharing = on
+	return nil
+}
+
+func (f *fakeSession) Sharing() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sharing
+}
+
+func (f *fakeSession) Frames() <-chan *image.RGBA { return f.frames }
+
+func (f *fakeSession) ScreenFrames() <-chan *image.RGBA { return f.screens }
+
+func (f *fakeSession) LocalFrames() <-chan *image.RGBA { return f.local }
+
+// callCounts is what the window asked of the Call controls.
+func (f *fakeSession) callCounts() (calls, answers, rejects, hangups int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls, f.answers, f.rejects, f.hangups
+}
+
+// cameraAsked and shareAsked are what the window asked of the camera and the
+// screen share, in order.
+func (f *fakeSession) cameraAsked() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.cameraAsks...)
+}
+
+func (f *fakeSession) shareAsked() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.shareAsks...)
+}
+
+// deliver puts one picture on one of the Call's channels, as a Session's media
+// pipeline would.
+func (f *fakeSession) deliver(t *testing.T, frames chan *image.RGBA, img *image.RGBA) {
+	t.Helper()
+	select {
+	case frames <- img:
+	case <-time.After(waitTimeout):
+		t.Fatal("the Call's pictures are not being read")
+	}
+}
+
+// testCallID stands in for a minted Call id; the window only passes it
+// through.
+const testCallID = "00000000-0000-7000-8000-000000000001"
 
 // Close ends the fake Session the way a real one does: the events channel
 // closes, which is what the window waits for.

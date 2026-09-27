@@ -2,6 +2,7 @@ package gui
 
 import (
 	"context"
+	"image"
 
 	"github.com/DSNR/dcc/internal/identity"
 	"github.com/DSNR/dcc/internal/session"
@@ -12,9 +13,6 @@ import (
 // *session.Session satisfies it as it stands; the interface exists so that
 // this package can be tested for what it shows and what it asks for, with a
 // fake in place of a real Session.
-//
-// It is the text half of a Session — chat, which is what this window does.
-// A Call's controls arrive with the work that adds them.
 type Session interface {
 	// Events is the Session's one output, closing when the Session is over
 	// for good.
@@ -30,6 +28,36 @@ type Session interface {
 	// SendText sends one message and returns the id its statuses arrive
 	// against.
 	SendText(body string) (string, error)
+	// Call rings the other person and returns the new Call's id.
+	Call() (string, error)
+	// Answer picks up the Call ringing here.
+	Answer() error
+	// Reject turns down the Call ringing here.
+	Reject() error
+	// Hangup ends the Call, leaving the Session up for text.
+	Hangup() error
+	// Mute stops or resumes sending this side's microphone.
+	Mute(muted bool) error
+	// Muted reports whether this side's microphone is being sent.
+	Muted() bool
+	// Camera turns this side's camera on or off. It opens or releases the
+	// device, so it blocks and never runs on the window's goroutine.
+	Camera(on bool) error
+	// CameraOn reports whether this side's camera is being sent — which a
+	// camera that unplugged itself answers for too.
+	CameraOn() bool
+	// Share starts or stops sharing this side's entire screen. Like Camera it
+	// opens or releases a device, so it never runs on the window's goroutine.
+	Share(on bool) error
+	// Sharing reports whether this side's screen is being shared.
+	Sharing() bool
+	// Frames is the other side's decoded camera video, newest picture only.
+	Frames() <-chan *image.RGBA
+	// ScreenFrames is the other side's shared screen, on its own channel.
+	ScreenFrames() <-chan *image.RGBA
+	// LocalFrames is this side's own camera, straight from the device — the
+	// picture-in-picture.
+	LocalFrames() <-chan *image.RGBA
 	// Close ends the Session and releases everything it holds.
 	Close() error
 }

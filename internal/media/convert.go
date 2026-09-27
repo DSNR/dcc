@@ -89,6 +89,17 @@ func I420ToRGBA(pic Picture, dst *image.RGBA) {
 	}
 }
 
+// RGBA is one picture as an RGBA image of its own, which is the shape both UIs
+// paint — a decoded frame on the way in, a captured one on the way to a local
+// preview. It allocates a frame at a time: the planes it reads are overwritten
+// by the next frame, and a UI holding a picture that changed underneath it
+// would tear.
+func (p Picture) RGBA() *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, p.Width, p.Height))
+	I420ToRGBA(p, img)
+	return img
+}
+
 // RGBAToI420 converts one RGBA image into dst, sampling to fit: dst may be
 // smaller than the source, in which case pixels are taken at even intervals
 // across it. That is what lets a screen far larger than anything a camera

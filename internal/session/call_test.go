@@ -476,6 +476,79 @@ func drainFrames(s *session.Session, wait time.Duration) {
 	}
 }
 
+// TestCallShowsThisSideItsOwnCamera is the local preview's path: a camera
+// turned on inside a Call is put in front of the side sending it, in its own
+// tint and at its own size, and stops being when the camera goes off. It is
+// what a picture-in-picture paints, and it never leaves the machine.
+func TestCallShowsThisSideItsOwnCamera(t *testing.T) {
+	host, peer, _, _ := callPair(t, 0)
+
+	if _, err := host.Call(); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	waitCall(t, peer, session.Incoming)
+	if err := peer.Answer(); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	waitCall(t, host, session.Active)
+	waitCall(t, peer, session.Active)
+
+	// A Call with no camera on shows this side nothing of itself.
+	if img := localFrame(host, 500*time.Millisecond); img != nil {
+		t.Error("the host is seeing itself with no camera turned on")
+	}
+
+	if err := host.Camera(true); err != nil {
+		t.Fatalf("Camera(true): %v", err)
+	}
+	img := localFrame(host, 10*time.Second)
+	if img == nil {
+		t.Fatal("the host never saw its own camera")
+	}
+	if w, h := img.Bounds().Dx(), img.Bounds().Dy(); w != media.VideoWidth || h != media.VideoHeight {
+		t.Errorf("the local picture is %dx%d, want %dx%d", w, h, media.VideoWidth, media.VideoHeight)
+	}
+	// Nothing is encoded on the way to a local picture, so its own tint
+	// arrives almost exactly and the other side's not at all.
+	if share := media.Tinted(img, hostTint); share < 0.85 {
+		t.Errorf("only %.0f%% of the local picture is the host's own tint", share*100)
+	}
+	if share := media.Tinted(img, peerTint); share > 0.1 {
+		t.Errorf("%.0f%% of the local picture is the peer's tint", share*100)
+	}
+
+	if err := host.Camera(false); err != nil {
+		t.Fatalf("Camera(false): %v", err)
+	}
+	drainLocal(host, time.Second)
+	if img := localFrame(host, time.Second); img != nil {
+		t.Error("the host is still seeing a camera it turned off")
+	}
+}
+
+// localFrame waits up to wait for one picture of this side's own camera.
+func localFrame(s *session.Session, wait time.Duration) *image.RGBA {
+	select {
+	case img := <-s.LocalFrames():
+		return img
+	case <-time.After(wait):
+		return nil
+	}
+}
+
+// drainLocal throws away whatever local pictures arrive for a while, so that
+// an assertion about nothing arriving afterwards means something.
+func drainLocal(s *session.Session, wait time.Duration) {
+	deadline := time.After(wait)
+	for {
+		select {
+		case <-s.LocalFrames():
+		case <-deadline:
+			return
+		}
+	}
+}
+
 // TestCallCarriesAScreenShare is the screen's whole path: shared inside an
 // Active Call it shows up on the other side — as a media state they can see and
 // as pictures they can paint — it arrives alongside the camera rather than in
