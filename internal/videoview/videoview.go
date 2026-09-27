@@ -53,6 +53,11 @@ func Layout(gtx layout.Context, large, small *image.RGBA, empty layout.Widget) l
 
 	layout.Stack{Alignment: layout.SE}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			// A Stack offers an expanded child no more than the thumbnail's
+			// own size as a minimum, and both a letterboxed picture and a
+			// line about a missing one centre themselves in the minimum they
+			// were given. The area is what they are meant to be centred in.
+			gtx.Constraints.Min = area
 			switch {
 			case large != nil:
 				return picture(gtx, large)

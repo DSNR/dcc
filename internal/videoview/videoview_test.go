@@ -94,6 +94,25 @@ func TestTheVideoAreaIsTheWholeSpaceItWasGiven(t *testing.T) {
 	}
 }
 
+// TestWhatIsInTheAreaIsCentredInIt checks the line about a missing picture is
+// offered the whole area as its minimum. A widget that centres itself centres
+// in the minimum it was given, and a Stack offers an expanded child no more
+// than the thumbnail's size — so without this the line about a Call waiting
+// for video is tucked into the corner the thumbnail sits in rather than put
+// where the picture would have been.
+func TestWhatIsInTheAreaIsCentredInIt(t *testing.T) {
+	area := image.Pt(400, 150)
+	var offered layout.Constraints
+	said := func(gtx layout.Context) layout.Dimensions {
+		offered = gtx.Constraints
+		return layout.Dimensions{Size: image.Pt(60, 20)}
+	}
+	Layout(newContext(area), nil, frame(320, 240), said)
+	if offered.Min != area {
+		t.Errorf("the line about a missing picture is centred in %v, not in the %v area", offered.Min, area)
+	}
+}
+
 // TestThumbnailIsASmallCornerOfTheWindow checks the thumbnail keeps its
 // picture's shape, stays a corner of the window rather than most of it, and
 // never asks for more room than there is.
