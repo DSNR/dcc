@@ -60,7 +60,7 @@ func start(t *testing.T, opts transport.Options) *end {
 	opts.Up = func(l transport.Link) { e.up <- l }
 	opts.Frame = func(f wire.Frame) { e.frames <- f }
 	opts.Down = func(err error) { e.down <- err }
-	opts.Audio = func(payload []byte) {
+	opts.Audio = func(_ uint16, payload []byte) {
 		select {
 		case e.audio <- append([]byte(nil), payload...):
 		default:

@@ -23,6 +23,11 @@ const (
 	// byte on every two samples, so a frame is 160 bytes — the same as the
 	// µ-law it replaced, at twice the audio bandwidth.
 	PayloadBytes = FrameSamples / 2
+	// concealLimit is how long a gap in the other side's frames is worth
+	// filling with silence. Beyond it they stopped talking to us — muted, or
+	// a network that went away — and the stream picks up wherever it resumes
+	// rather than playing out seconds of catch-up silence.
+	concealLimit = 10
 	// playLimit is the largest frame this side will decode, in payload
 	// bytes: half a second, far more than any frame dcc sends, so that a
 	// peer claiming an enormous frame cannot make this side allocate for it.
@@ -95,6 +100,11 @@ type Audio struct {
 	// directions.
 	enc *Encoder
 	dec *Decoder
+	// expect is the sequence number the next frame should carry, so that a
+	// gap can be played as the silence it is rather than closing up and
+	// running the playout buffer dry. Zero until the first frame arrives.
+	expect  uint16
+	started bool
 	// play is the scratch buffer Play decodes into, reused across frames
 	// the way capture reuses its own — fifty frames a second is no place to
 	// be allocating.
@@ -153,10 +163,13 @@ func (a *Audio) Muted() bool {
 	return a.muted
 }
 
-// Play decodes one received frame into the speaker. A frame that arrives
-// after Close, or with nothing in it, is dropped. Frames are played in the
-// order they are handed over, which is the order the Call delivered them.
-func (a *Audio) Play(payload []byte) {
+// Play decodes one received frame into the speaker. seq is the frame's RTP
+// sequence number, which is how Play tells a lost frame from a late one: a
+// gap is played as silence, so the stream keeps its own timing instead of
+// closing up and starving the playout buffer, and a frame that arrives after
+// the gap was already filled is thrown away rather than played out of order.
+// A frame that arrives after Close, or with nothing in it, is dropped.
+func (a *Audio) Play(seq uint16, payload []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed || a.sink == nil || len(payload) == 0 || len(payload) > playLimit {
@@ -167,6 +180,21 @@ func (a *Audio) Play(payload []byte) {
 		// allowed a different frame size, so the buffer grows to it once.
 		a.play = make([]int16, samples)
 	}
+	if a.started {
+		// int16 so that wrapping past 65535 reads as the small step it is.
+		switch gap := int16(seq - a.expect); {
+		case gap < 0:
+			// Older than what has already been played: too late to be worth
+			// hearing, and playing it now would be worse than the gap it
+			// was meant to fill.
+			return
+		case gap > 0 && int(gap) <= concealLimit:
+			for range gap {
+				_ = a.sink.Write(a.dec.Conceal(a.play[:FrameSamples]))
+			}
+		}
+	}
+	a.expect, a.started = seq+1, true
 	// A dropped frame is a click; a dropped Call is not. Playback errors are
 	// this side's speaker misbehaving and say nothing about the connection.
 	_ = a.sink.Write(a.dec.Decode(payload, a.play))

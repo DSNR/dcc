@@ -163,7 +163,11 @@ wart of RFC 3551 that every stack reproduces, so a 20 ms frame advances the
 timestamp by 160. ADR 0005 records why it is not Opus or uncompressed PCM, and
 ADR 0004 why it was G.711 µ-law before that. A received RTP packet with an
 empty payload is padding, and is skipped rather than decoded: it carries no
-audio, and playing it would be a frame of silence nobody sent.
+audio, and playing it would be a frame of silence nobody sent. A gap in the
+audio sequence numbers is played as silence of the same length rather than
+closed up, so that losing a frame costs a frame and not the playout buffer,
+and a frame that arrives after its gap was filled is dropped rather than
+played out of order.
 
 Video is **VP8 — RTP payload type 96, 90 kHz clock**, on two tracks named
 `cam` and `screen` within the `dcc` stream, which is how each side tells the

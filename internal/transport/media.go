@@ -361,8 +361,11 @@ func (t *Transport) readVideo(track *webrtc.TrackRemote, stream *videoStream, de
 	}
 }
 
-// readAudio feeds each received audio frame to the Call. Padding-only
-// packets are skipped: they carry no audio, and handing an empty
+// readAudio feeds each received audio frame to the Call, with the sequence
+// number it arrived under: audio has no keyframes to recover at, so a frame
+// that was lost or overtaken is the playout's problem to conceal and it
+// cannot tell one from the other without being told where the frame belongs.
+// Padding-only packets are skipped: they carry no audio, and handing an empty
 // payload to the decoder would play a frame of nothing that was never sent.
 func (t *Transport) readAudio(track *webrtc.TrackRemote) {
 	for {
@@ -381,7 +384,7 @@ func (t *Transport) readAudio(track *webrtc.TrackRemote) {
 			return
 		}
 		if audio != nil {
-			audio(pkt.Payload)
+			audio(pkt.SequenceNumber, pkt.Payload)
 		}
 	}
 }

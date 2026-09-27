@@ -76,6 +76,15 @@ func (d *Decoder) Decode(payload []byte, pcm []int16) []int16 {
 	return pcm
 }
 
+// Conceal writes one frame of silence into pcm — what the receive side plays
+// where a frame should have been. The adaptive state is left alone: it is
+// still the best guess at where the sender's is, and re-deriving it from
+// silence would make the frames that do arrive worse.
+func (d *Decoder) Conceal(pcm []int16) []int16 {
+	clear(pcm)
+	return pcm
+}
+
 // The quadrature mirror filter pair that splits 16 kHz audio into G.722's two
 // 8 kHz sub-bands and puts it back together. qmfTaps is the 24-tap prototype
 // from the recommendation, scaled by 8192; it is symmetric, and its even and

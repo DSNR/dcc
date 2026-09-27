@@ -154,3 +154,18 @@ func TestCodecStreamState(t *testing.T) {
 		}
 	}
 }
+
+// TestCodecConceal proves a concealed frame is silence of the right length —
+// what the receive side plays where a frame never arrived.
+func TestCodecConceal(t *testing.T) {
+	dec := media.NewDecoder()
+	got := dec.Conceal(make([]int16, media.FrameSamples))
+	if len(got) != media.FrameSamples {
+		t.Fatalf("concealed %d samples, want %d", len(got), media.FrameSamples)
+	}
+	for i, s := range got {
+		if s != 0 {
+			t.Fatalf("concealment is not silent: %d at sample %d", s, i)
+		}
+	}
+}

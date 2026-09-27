@@ -83,7 +83,7 @@ type Options struct {
 	Frame func(wire.Frame)
 	// Audio delivers each received audio frame's encoded payload, in the
 	// codec the media package defines. Nil means a Call is heard by nobody.
-	Audio func(payload []byte)
+	Audio func(seq uint16, payload []byte)
 	// Video delivers each received camera frame, reassembled from its RTP
 	// payloads. Nil means a Call is watched by nobody.
 	Video func(frame []byte)

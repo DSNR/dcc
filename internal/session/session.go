@@ -520,7 +520,7 @@ func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiato
 		Up:             func(link transport.Link) { s.onTransportUp(gen, link) },
 		Frame:          func(f wire.Frame) { s.onData(gen, f) },
 		Down:           func(err error) { s.onTransportDown(gen, err) },
-		Audio:          func(payload []byte) { s.onAudio(gen, payload) },
+		Audio:          func(seq uint16, payload []byte) { s.onAudio(gen, seq, payload) },
 		Video:          func(frame []byte) { s.onVideo(gen, frame) },
 		KeyframeWanted: func() { s.onKeyframeWanted(gen) },
 		MediaUp:        func() { s.onMediaUp(gen) },
