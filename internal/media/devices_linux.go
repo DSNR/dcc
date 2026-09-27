@@ -14,6 +14,9 @@ import (
 // camera side is in camera_linux.go.
 func System() Devices { return linuxDevices{} }
 
+// Screen implements Devices, sharing the primary display.
+func (linuxDevices) Screen() (Screen, error) { return openScreen() }
+
 // linuxDevices opens one PulseAudio client per audio stream. A client is a
 // socket and a goroutine, and tying its life to the stream's means closing
 // the stream closes everything it holds.

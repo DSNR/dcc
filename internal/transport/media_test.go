@@ -153,3 +153,83 @@ func sendVideoUntilSeen(t *testing.T, from, to *end, frame []byte) {
 		}
 	}
 }
+
+// TestScreenFlowsOnItsOwnStream proves a shared screen is a stream of its own
+// and not a second camera: a frame written to the screen arrives as a screen,
+// a frame written to the camera arrives as a camera, and neither is mistaken
+// for the other. A keyframe asked for on the screen comes back on the screen.
+func TestScreenFlowsOnItsOwnStream(t *testing.T) {
+	certA, certB := newCertificate(t), newCertificate(t)
+	a := start(t, transport.Options{Certificate: certA, Remote: certB.Fingerprint(), Initiator: true})
+	b := start(t, transport.Options{Certificate: certB, Remote: certA.Fingerprint()})
+	connect(a, b)
+	waitUp(t, a)
+	waitUp(t, b)
+
+	if err := a.tr.StartMedia(); err != nil {
+		t.Fatalf("StartMedia: %v", err)
+	}
+	waitMedia(t, a)
+	waitMedia(t, b)
+
+	// Two packets' worth again, so reassembly is doing something, and a
+	// pattern the camera's frame does not share.
+	frame := make([]byte, 2*1200)
+	for i := range frame {
+		frame[i] = byte(255 - i%256)
+	}
+	sendScreenUntilSeen(t, a, b, frame)
+
+	// Nothing arrived on the camera while the screen was being sent.
+	select {
+	case got := <-b.video:
+		t.Fatalf("%d bytes of shared screen arrived as camera video", len(got))
+	default:
+	}
+
+	// The side watching the screen asks for a keyframe on it, and the sender
+	// hears it as a screen keyframe rather than a camera one.
+	b.tr.RequestScreenKeyframe()
+	select {
+	case <-a.scrfr:
+	case <-a.keyfr:
+		t.Fatal("a keyframe asked for on the screen came back as a camera keyframe")
+	case err := <-a.down:
+		t.Fatalf("Transport went down waiting for the PLI: %v", err)
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the screen keyframe request to arrive")
+	}
+}
+
+// TestWriteScreenBeforeCall checks a screen frame written with no Call
+// negotiated is refused rather than silently dropped.
+func TestWriteScreenBeforeCall(t *testing.T) {
+	certA, certB := newCertificate(t), newCertificate(t)
+	a := start(t, transport.Options{Certificate: certA, Remote: certB.Fingerprint(), Initiator: true})
+	if err := a.tr.WriteScreen([]byte{1, 2, 3}, media.ScreenFrameDuration); err == nil {
+		t.Fatal("a screen frame was accepted with no Call to send it to")
+	}
+}
+
+// sendScreenUntilSeen is sendVideoUntilSeen for the screen stream.
+func sendScreenUntilSeen(t *testing.T, from, to *end, frame []byte) {
+	t.Helper()
+	deadline := time.After(waitTimeout)
+	for {
+		if err := from.tr.WriteScreen(frame, media.ScreenFrameDuration); err != nil {
+			t.Fatalf("WriteScreen: %v", err)
+		}
+		select {
+		case got := <-to.screen:
+			if !bytes.Equal(got, frame) {
+				t.Fatalf("saw %d bytes, want the %d that were shared", len(got), len(frame))
+			}
+			return
+		case err := <-to.down:
+			t.Fatalf("Transport went down waiting for the shared screen: %v", err)
+		case <-deadline:
+			t.Fatal("timed out waiting for the shared screen to arrive")
+		case <-time.After(media.ScreenFrameDuration):
+		}
+	}
+}

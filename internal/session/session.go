@@ -133,15 +133,20 @@ type Session struct {
 	video     *media.Video
 	muted     bool
 	cam       bool
-	// noMic and noCam record that this machine's microphone or camera could
-	// not be opened, so that turning on one that does not exist is refused
-	// rather than announced.
-	noMic bool
-	noCam bool
-	// frames carries the other side's decoded video to the UI, newest frame
-	// only. It is not an Event: fifteen pictures a second do not belong in a
-	// queue that promises to deliver everything in order.
-	frames chan *image.RGBA
+	screen    bool
+	// noMic, noCam and noScreen record that this machine's microphone, camera
+	// or display could not be opened, so that turning on one that does not
+	// exist is refused rather than announced.
+	noMic    bool
+	noCam    bool
+	noScreen bool
+	// frames carries the other side's decoded camera video to the UI, and
+	// screenFrames their shared screen, newest frame only on each. They are
+	// not Events: fifteen pictures a second do not belong in a queue that
+	// promises to deliver everything in order, and the two streams must not
+	// wait behind one another.
+	frames       chan *image.RGBA
+	screenFrames chan *image.RGBA
 	// remoteMedia is the other side's last announced stream state, held so
 	// that one that arrives before this side is Active is not lost.
 	remoteMedia     MediaChanged
@@ -192,7 +197,9 @@ func New(opts Options) (*Session, error) {
 		relayOnly: opts.RelayOnly,
 		state:     Idle,
 		seen:      make(map[string]bool),
-		frames:    make(chan *image.RGBA, 1),
+
+		frames:       make(chan *image.RGBA, 1),
+		screenFrames: make(chan *image.RGBA, 1),
 	}, nil
 }
 
@@ -509,6 +516,9 @@ func (s *Session) attachLocked(conn *signaling.Conn, name, dtls string, initiato
 		Video:          func(frame []byte) { s.onVideo(gen, frame) },
 		KeyframeWanted: func() { s.onKeyframeWanted(gen) },
 		MediaUp:        func() { s.onMediaUp(gen) },
+
+		Screen:               func(frame []byte) { s.onScreen(gen, frame) },
+		ScreenKeyframeWanted: func() { s.onScreenKeyframeWanted(gen) },
 	}
 	if s.isHost {
 		s.relayListener = relay.NewListener()

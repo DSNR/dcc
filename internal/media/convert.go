@@ -88,3 +88,35 @@ func I420ToRGBA(pic Picture, dst *image.RGBA) {
 		}
 	}
 }
+
+// RGBAToI420 converts one RGBA image into dst, sampling to fit: dst may be
+// smaller than the source, in which case pixels are taken at even intervals
+// across it. That is what lets a screen far larger than anything a camera
+// produces be shared at a size a pure-Go encoder can keep up with.
+func RGBAToI420(src *image.RGBA, dst Picture) error {
+	bounds := src.Bounds()
+	if bounds.Empty() || dst.Width <= 0 || dst.Height <= 0 {
+		return fmt.Errorf("media: cannot fit a %v image into a %dx%d picture",
+			bounds, dst.Width, dst.Height)
+	}
+	width, height := bounds.Dx(), bounds.Dy()
+	for row := range dst.Height {
+		line := src.Pix[src.PixOffset(bounds.Min.X, bounds.Min.Y+row*height/dst.Height):]
+		luma := dst.Y[row*dst.YStride:]
+		// Chroma is half-resolution in both directions, so only every second
+		// row writes it, and only every second pixel within that row.
+		var u, v []byte
+		if row%2 == 0 {
+			u, v = dst.U[(row/2)*dst.UStride:], dst.V[(row/2)*dst.VStride:]
+		}
+		for i := range dst.Width {
+			px := line[(i*width/dst.Width)*4:]
+			y, cb, cr := color.RGBToYCbCr(px[0], px[1], px[2])
+			luma[i] = y
+			if u != nil && i%2 == 0 {
+				u[i/2], v[i/2] = cb, cr
+			}
+		}
+	}
+	return nil
+}

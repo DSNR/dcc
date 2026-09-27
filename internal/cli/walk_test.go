@@ -64,7 +64,7 @@ func TestTwoTerminalsChat(t *testing.T) {
 // two terminal interfaces: rung, answered, heard — each side hearing the
 // other's tone and not its own — seen, muted, and hung up back to text.
 func TestTwoTerminalsCall(t *testing.T) {
-	hostDevices := &media.Fake{Tone: 440, Tint: walkTint}
+	hostDevices := &media.Fake{Tone: 440, Tint: walkTint, ScreenTint: walkScreenTint}
 	peerDevices := &media.Fake{Tone: 1100}
 	host, _ := terminalWithVideo(t, "alice", hostDevices)
 	peer, peerWindows := terminalWithVideo(t, "bob", peerDevices)
@@ -111,6 +111,24 @@ func TestTwoTerminalsCall(t *testing.T) {
 		}
 	})
 
+	// The Host shares their screen mid-Call, and it arrives in the same window
+	// — on its own stream, in its own colour, so it cannot be the camera.
+	host.submit("/share")
+	host.mustSee("Sharing your whole screen")
+	peer.mustSee(`"alice" is sharing their screen`)
+	peer.until("the Host's screen in the window", func() bool {
+		select {
+		case img := <-peerWindows.screen():
+			return img != nil && media.Tinted(img, walkScreenTint) > 0.7
+		default:
+			return false
+		}
+	})
+
+	host.submit("/stopshare")
+	host.mustSee("Screen share stopped")
+	peer.mustSee(`"alice" stopped sharing their screen`)
+
 	host.submit("/mute")
 	peer.mustSee(`"alice" muted their microphone`)
 	host.mustSee("muted")
@@ -134,8 +152,13 @@ func tone(f *media.Fake, freq float64) bool {
 }
 
 // walkTint is the colour the Host's fake camera paints, which is how the Peer's
-// video window can be told to be showing the Host and not itself.
-var walkTint = color.RGBA{R: 200, G: 40, B: 40, A: 0xFF}
+// video window can be told to be showing the Host and not itself. walkScreenTint
+// is the Host's fake screen, for the same reason again — a shared desktop and a
+// face must not be mistakable for each other.
+var (
+	walkTint       = color.RGBA{R: 200, G: 40, B: 40, A: 0xFF}
+	walkScreenTint = color.RGBA{R: 200, G: 190, B: 40, A: 0xFF}
+)
 
 // terminal is one dcc-cli, wired to real Sessions over a loopback Rendezvous:
 // real Identity, real Noise handshake, real pion, no cloudflared. Calls run

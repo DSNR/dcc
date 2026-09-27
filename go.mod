@@ -13,7 +13,9 @@ require (
 	github.com/flynn/noise v1.1.0
 	github.com/go-ole/go-ole v1.3.0
 	github.com/google/uuid v1.6.0
+	github.com/jezek/xgb v1.1.1
 	github.com/jfreymuth/pulse v0.1.3
+	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
 	github.com/moutend/go-wca v0.3.0
 	github.com/muesli/termenv v0.16.0
 	github.com/pion/ice/v4 v4.4.2
@@ -39,8 +41,11 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
+	github.com/gen2brain/shm v0.1.0 // indirect
 	github.com/go-text/typesetting v0.3.4 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
+	github.com/lxn/win v0.0.0-20210218163916-a377121e959e // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-runewidth v0.0.19 // indirect

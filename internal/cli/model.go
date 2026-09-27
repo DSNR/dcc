@@ -74,12 +74,14 @@ type Model struct {
 	// prompt is the standing Security Code prompt, nil when none stands.
 	prompt *session.VerifyPrompt
 
-	// call is where the Call inside the Session stands, and remoteMic and
-	// remoteCam are what the other side last said about their microphone and
-	// camera. All three are only meaningful while a Call is running.
-	call      session.CallState
-	remoteMic bool
-	remoteCam bool
+	// call is where the Call inside the Session stands, and remoteMic,
+	// remoteCam and remoteScreen are what the other side last said about their
+	// microphone, camera and screen. All four are only meaningful while a Call
+	// is running.
+	call         session.CallState
+	remoteMic    bool
+	remoteCam    bool
+	remoteScreen bool
 	// video is the video window, open exactly while a Call is Active. It is
 	// a separate desktop window so that the terminal stays a terminal.
 	video VideoWindow
@@ -256,6 +258,10 @@ func (m Model) submit(line string) (tea.Model, tea.Cmd) {
 		return m.setMuted(false)
 	case camera:
 		return m.setCamera(c.arg)
+	case share:
+		return m.setSharing(true)
+	case stopShare:
+		return m.setSharing(false)
 	case text:
 		return m.send(c.arg)
 	case unknown:
@@ -467,6 +473,16 @@ func (m Model) setCamera(arg string) (tea.Model, tea.Cmd) {
 	return m, cameraCmd(m.sess, on)
 }
 
+// setSharing starts or stops sharing this side's screen. Like the camera it
+// opens a device, so it happens off the UI's goroutine.
+func (m Model) setSharing(on bool) (tea.Model, tea.Cmd) {
+	if m.sess == nil || m.call == session.NoCall {
+		m.add(notice("There is no Call to share a screen into."))
+		return m, nil
+	}
+	return m, shareCmd(m.sess, on)
+}
+
 // disconnect ends the Session but stays in the app, so that the conversation
 // can be read back and another Invite made.
 func (m Model) disconnect() (tea.Model, tea.Cmd) {
@@ -536,7 +552,7 @@ func (m *Model) apply(e session.Event) tea.Cmd {
 		// other side's own media state follows and corrects this if it does
 		// not.
 		m.remoteMic = e.State == session.Active
-		m.remoteCam = false
+		m.remoteCam, m.remoteScreen = false, false
 		if said := callNotice(e, m.peerName()); said != "" {
 			m.add(notice(said))
 		}
@@ -560,6 +576,15 @@ func (m *Model) apply(e session.Event) tea.Cmd {
 			m.remoteCam = e.Cam
 			m.add(notice(camNotice(e.Cam, m.peerName())))
 		}
+		if m.remoteScreen != e.Screen {
+			m.remoteScreen = e.Screen
+			m.add(notice(shareNotice(e.Screen, m.peerName())))
+			// The window shows one thing at a time, and while they are sharing
+			// that thing is their screen.
+			if m.video != nil {
+				m.video.Sharing(e.Screen)
+			}
+		}
 
 	case session.TextStatus:
 		if i, known := m.index[e.ID]; known {
@@ -582,6 +607,7 @@ func (m *Model) openVideo() tea.Cmd {
 	m.video = m.openWindow(VideoOptions{
 		Title:  "dcc — " + m.peerName(),
 		Frames: m.sess.Frames(),
+		Screen: m.sess.ScreenFrames(),
 		Failed: func(err error) {
 			select {
 			case failed <- err:
@@ -613,7 +639,7 @@ func (m *Model) released() {
 	m.prompt = nil
 	m.link = 0
 	m.call = session.NoCall
-	m.remoteMic, m.remoteCam = false, false
+	m.remoteMic, m.remoteCam, m.remoteScreen = false, false, false
 	m.layout()
 	if m.state == session.Idle {
 		// It never got going — a refused Invite string, say. Whatever
@@ -739,6 +765,20 @@ func cameraCmd(s Session, on bool) tea.Cmd {
 			return noticeMsg{text: "Camera on — they can see you."}
 		}
 		return noticeMsg{text: "Camera off — the device is released."}
+	}
+}
+
+// shareCmd starts or stops sharing this side's screen and says what came of
+// it. It runs off the UI's goroutine because opening a display is not instant.
+func shareCmd(s Session, on bool) tea.Cmd {
+	return func() tea.Msg {
+		if err := s.Share(on); err != nil {
+			return noticeMsg{text: "Screen share: " + err.Error()}
+		}
+		if on {
+			return noticeMsg{text: "Sharing your whole screen — /stopshare ends it."}
+		}
+		return noticeMsg{text: "Screen share stopped — the display is released."}
 	}
 }
 

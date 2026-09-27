@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/DSNR/dcc/internal/cli"
@@ -209,4 +210,100 @@ func TestVideoWindowClosedByHand(t *testing.T) {
 	// The Call is still a Call.
 	h.submit("/mute")
 	h.until("the microphone to be muted", func() bool { return f.Muted() })
+}
+
+// TestShareControlsReachTheSession checks /share and /stopshare reach the
+// Session and say what happened.
+func TestShareControlsReachTheSession(t *testing.T) {
+	h, f := connected(t)
+	f.emit(session.CallChanged{State: session.Active, CallID: testCallID})
+	h.mustSee("In a Call")
+
+	h.submit("/share")
+	h.until("the screen to be shared", func() bool { return f.Sharing() })
+	h.mustSee("Sharing your whole screen")
+
+	h.submit("/stopshare")
+	h.until("the share to stop", func() bool { return !f.Sharing() })
+	h.mustSee("Screen share stopped")
+
+	h.settle()
+	if got := f.shareCalls(); len(got) != 2 || !got[0] || got[1] {
+		t.Fatalf("the Session was asked for %v, want on then off", got)
+	}
+}
+
+// TestShareNeedsACall checks sharing outside a Call says so rather than
+// reaching a Session that has nowhere to send a screen.
+func TestShareNeedsACall(t *testing.T) {
+	h, f := connected(t)
+	h.submit("/share")
+	h.mustSee("There is no Call to share a screen into.")
+	h.settle()
+	if got := f.shareCalls(); len(got) != 0 {
+		t.Fatalf("the Session was asked for %v with no Call", got)
+	}
+}
+
+// TestShareThatWillNotStartSaysSo checks a machine with no display to share —
+// a headless Linux box, or one running Wayland — is told rather than left
+// believing the other side can see something.
+func TestShareThatWillNotStartSaysSo(t *testing.T) {
+	h, f := connected(t)
+	f.shareErr = errors.New("session: there is no screen to share on this machine")
+	f.emit(session.CallChanged{State: session.Active, CallID: testCallID})
+	h.mustSee("In a Call")
+
+	h.submit("/share")
+	h.mustSee("Screen share: session: there is no screen to share on this machine")
+	if f.Sharing() {
+		t.Error("a share that failed reads as sharing")
+	}
+}
+
+// TestRemoteShareIsShown checks the other side sharing their screen is said out
+// loud and the video window is told — it shows one thing at a time, and a
+// window that silently swapped from a face to a desktop would be a mystery.
+func TestRemoteShareIsShown(t *testing.T) {
+	h, f, windows := connectedWithVideo(t, nil)
+	f.emit(session.CallChanged{State: session.Active, CallID: testCallID})
+	h.until("the video window to open", func() bool {
+		opened, _ := windows.counts()
+		return opened == 1
+	})
+	if got := windows.screen(); got == nil {
+		t.Error("the window was opened with nowhere to paint a shared screen")
+	}
+
+	f.emit(session.MediaChanged{Mic: true, Screen: true})
+	h.mustSee(`"Alice" is sharing their screen`)
+	h.until("the window to be shown the screen", func() bool {
+		shown := windows.shown()
+		return len(shown) > 0 && shown[len(shown)-1]
+	})
+
+	f.emit(session.MediaChanged{Mic: true, Screen: false})
+	h.mustSee(`"Alice" stopped sharing their screen`)
+	h.until("the window to go back to the camera", func() bool {
+		shown := windows.shown()
+		return len(shown) > 0 && !shown[len(shown)-1]
+	})
+}
+
+// TestShareIsForgottenWhenTheCallEnds checks a share does not outlive the Call
+// it was running in: the next Call starts with nobody sharing, whatever the
+// last one ended in the middle of.
+func TestShareIsForgottenWhenTheCallEnds(t *testing.T) {
+	h, f := connected(t)
+	f.emit(session.CallChanged{State: session.Active, CallID: testCallID})
+	f.emit(session.MediaChanged{Mic: true, Screen: true})
+	h.mustSee(`"Alice" is sharing their screen`)
+	// On the status line, where the separator is what tells it from the
+	// conversation entry saying the same thing.
+	h.mustSee("· sharing their screen")
+
+	f.emit(session.CallChanged{State: session.NoCall, Reason: session.CallEnded})
+	f.emit(session.CallChanged{State: session.Active, CallID: testCallID})
+	h.mustSee("In a Call")
+	h.mustNotSee("· sharing their screen")
 }

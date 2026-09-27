@@ -79,15 +79,13 @@ func waitVideo(t *testing.T, s *seen, n int) {
 // off — which is also when the device is released.
 func TestVideoCameraOnAndOff(t *testing.T) {
 	var got seen
-	video, err := media.StartVideo(media.VideoOptions{
-		Devices: &media.Fake{}, Send: got.take, Frame: got.show,
-	})
+	video, err := media.StartVideo(cameraOnly(&media.Fake{}, &got))
 	if err != nil {
 		t.Fatalf("StartVideo: %v", err)
 	}
 	defer video.Close()
 
-	if video.On() {
+	if video.CameraOn() {
 		t.Fatal("the camera is on before anyone turned it on")
 	}
 	time.Sleep(3 * media.VideoFrameDuration)
@@ -98,7 +96,7 @@ func TestVideoCameraOnAndOff(t *testing.T) {
 	if err := video.Camera(true); err != nil {
 		t.Fatalf("Camera(true): %v", err)
 	}
-	if !video.On() {
+	if !video.CameraOn() {
 		t.Fatal("the camera is off after being turned on")
 	}
 	waitVideo(t, &got, 3)
@@ -106,7 +104,7 @@ func TestVideoCameraOnAndOff(t *testing.T) {
 	if err := video.Camera(false); err != nil {
 		t.Fatalf("Camera(false): %v", err)
 	}
-	if video.On() {
+	if video.CameraOn() {
 		t.Fatal("the camera is on after being turned off")
 	}
 	quiet := got.sent()
@@ -128,17 +126,12 @@ func TestVideoCameraOnAndOff(t *testing.T) {
 func TestVideoRoundTrip(t *testing.T) {
 	tint := color.RGBA{R: 200, G: 40, B: 40, A: 0xFF}
 	var sender, receiver seen
-	out, err := media.StartVideo(media.VideoOptions{
-		Devices: &media.Fake{Tint: tint}, Send: sender.take, Frame: sender.show,
-	})
+	out, err := media.StartVideo(cameraOnly(&media.Fake{Tint: tint}, &sender))
 	if err != nil {
 		t.Fatalf("StartVideo: %v", err)
 	}
 	defer out.Close()
-	in, err := media.StartVideo(media.VideoOptions{
-		Devices: &media.Fake{}, Send: receiver.take, Frame: receiver.show,
-		NeedKeyframe: receiver.needKeyframe,
-	})
+	in, err := media.StartVideo(cameraOnly(&media.Fake{}, &receiver))
 	if err != nil {
 		t.Fatalf("StartVideo: %v", err)
 	}
@@ -149,7 +142,7 @@ func TestVideoRoundTrip(t *testing.T) {
 	}
 	waitVideo(t, &sender, 4)
 	for _, frame := range sender.encoded() {
-		in.Play(frame)
+		in.PlayCamera(frame)
 	}
 
 	shown := receiver.pictures()
@@ -176,17 +169,12 @@ func TestVideoRoundTrip(t *testing.T) {
 // forever — and asks once, not fifteen times a second.
 func TestVideoAsksForAKeyframe(t *testing.T) {
 	var sender, receiver seen
-	out, err := media.StartVideo(media.VideoOptions{
-		Devices: &media.Fake{}, Send: sender.take, Frame: sender.show,
-	})
+	out, err := media.StartVideo(cameraOnly(&media.Fake{}, &sender))
 	if err != nil {
 		t.Fatalf("StartVideo: %v", err)
 	}
 	defer out.Close()
-	in, err := media.StartVideo(media.VideoOptions{
-		Devices: &media.Fake{}, Send: receiver.take, Frame: receiver.show,
-		NeedKeyframe: receiver.needKeyframe,
-	})
+	in, err := media.StartVideo(cameraOnly(&media.Fake{}, &receiver))
 	if err != nil {
 		t.Fatalf("StartVideo: %v", err)
 	}
@@ -198,7 +186,7 @@ func TestVideoAsksForAKeyframe(t *testing.T) {
 	waitVideo(t, &sender, 4)
 	// Everything but the keyframe the stream opened with.
 	for _, frame := range sender.encoded()[1:] {
-		in.Play(frame)
+		in.PlayCamera(frame)
 	}
 	if got := receiver.asked(); got != 1 {
 		t.Fatalf("asked for %d keyframes, want exactly 1", got)
@@ -208,11 +196,11 @@ func TestVideoAsksForAKeyframe(t *testing.T) {
 	}
 
 	// The answer to that ask is a keyframe, whatever the encoder had planned.
-	out.ForceKeyframe()
+	out.ForceCameraKeyframe()
 	before := sender.sent()
 	waitVideo(t, &sender, before+2)
 	for _, frame := range sender.encoded()[before:] {
-		in.Play(frame)
+		in.PlayCamera(frame)
 	}
 	if shown := receiver.pictures(); len(shown) == 0 {
 		t.Fatal("a forced keyframe did not get the receiver a picture")
@@ -223,9 +211,7 @@ func TestVideoAsksForAKeyframe(t *testing.T) {
 // a Call that has hung up cannot still be writing to a torn-down track.
 func TestVideoCloseStopsSending(t *testing.T) {
 	var got seen
-	video, err := media.StartVideo(media.VideoOptions{
-		Devices: &media.Fake{}, Send: got.take, Frame: got.show,
-	})
+	video, err := media.StartVideo(cameraOnly(&media.Fake{}, &got))
 	if err != nil {
 		t.Fatalf("StartVideo: %v", err)
 	}
@@ -255,14 +241,13 @@ type blindDevices struct{}
 func (blindDevices) Capture() (media.Source, error) { return nil, media.ErrNoDevices }
 func (blindDevices) Playback() (media.Sink, error)  { return nil, media.ErrNoDevices }
 func (blindDevices) Camera() (media.Camera, error)  { return nil, media.ErrNoCamera }
+func (blindDevices) Screen() (media.Screen, error)  { return nil, media.ErrNoScreen }
 
 // TestVideoWithoutACamera proves a machine with no camera still runs a Call's
 // video — it simply cannot send any, and is told so rather than pretending.
 func TestVideoWithoutACamera(t *testing.T) {
 	var got seen
-	video, err := media.StartVideo(media.VideoOptions{
-		Devices: blindDevices{}, Send: got.take, Frame: got.show,
-	})
+	video, err := media.StartVideo(cameraOnly(blindDevices{}, &got))
 	if err != nil {
 		t.Fatalf("StartVideo: %v", err)
 	}
@@ -270,7 +255,7 @@ func TestVideoWithoutACamera(t *testing.T) {
 	if err := video.Camera(true); err == nil {
 		t.Fatal("a machine with no camera turned one on")
 	}
-	if video.On() {
+	if video.CameraOn() {
 		t.Fatal("a camera that would not open reads as on")
 	}
 }
@@ -304,6 +289,7 @@ func (dyingDevices) Playback() (media.Sink, error)  { return nil, media.ErrNoDev
 func (d dyingDevices) Camera() (media.Camera, error) {
 	return d.camera, nil
 }
+func (dyingDevices) Screen() (media.Screen, error) { return nil, media.ErrNoScreen }
 
 // TestVideoCameraThatDiesSaysSo proves a camera that goes away mid-Call is
 // treated as off rather than left looking live: the device is released and
@@ -312,10 +298,9 @@ func TestVideoCameraThatDiesSaysSo(t *testing.T) {
 	var got seen
 	stopped := make(chan struct{}, 1)
 	devices := dyingDevices{camera: &dyingCamera{left: 3, shape: media.NewPicture(media.VideoWidth, media.VideoHeight)}}
-	video, err := media.StartVideo(media.VideoOptions{
-		Devices: devices, Send: got.take, Frame: got.show,
-		Stopped: func() { stopped <- struct{}{} },
-	})
+	opts := cameraOnly(devices, &got)
+	opts.Camera.Stopped = func() { stopped <- struct{}{} }
+	video, err := media.StartVideo(opts)
 	if err != nil {
 		t.Fatalf("StartVideo: %v", err)
 	}
@@ -329,7 +314,227 @@ func TestVideoCameraThatDiesSaysSo(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("a camera that died was never reported as stopped")
 	}
-	if video.On() {
+	if video.CameraOn() {
 		t.Error("a camera that died still reads as on")
+	}
+}
+
+// cameraOnly is a pipeline whose camera reports into got and whose screen
+// stream is wired up but never turned on — which is every test that is about
+// the camera. Both streams must be configured; a Call always has both.
+func cameraOnly(devices media.Devices, got *seen) media.VideoOptions {
+	var ignored seen
+	return media.VideoOptions{
+		Devices: devices,
+		Camera: media.StreamOptions{
+			Send: got.take, Frame: got.show, NeedKeyframe: got.needKeyframe,
+		},
+		Screen: media.StreamOptions{Send: ignored.take, Frame: ignored.show},
+	}
+}
+
+// screenOnly is cameraOnly the other way round: the screen reports into got
+// and the camera is never turned on.
+func screenOnly(devices media.Devices, got *seen) media.VideoOptions {
+	var ignored seen
+	return media.VideoOptions{
+		Devices: devices,
+		Camera:  media.StreamOptions{Send: ignored.take, Frame: ignored.show},
+		Screen: media.StreamOptions{
+			Send: got.take, Frame: got.show, NeedKeyframe: got.needKeyframe,
+		},
+	}
+}
+
+// waitStream waits for a stream paced at every to produce n frames.
+func waitStream(t *testing.T, s *seen, n int, every time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for s.sent() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d frames after waiting; wanted %d", s.sent(), n)
+		}
+		time.Sleep(every)
+	}
+}
+
+// TestScreenShareOnAndOff proves a screen is only captured while it is being
+// shared: nothing is sent before, frames flow while it is, and they stop when
+// sharing stops — which is also when the display is released.
+func TestScreenShareOnAndOff(t *testing.T) {
+	var got seen
+	video, err := media.StartVideo(screenOnly(&media.Fake{}, &got))
+	if err != nil {
+		t.Fatalf("StartVideo: %v", err)
+	}
+	defer video.Close()
+
+	if video.ScreenOn() {
+		t.Fatal("the screen is being shared before anyone shared it")
+	}
+	time.Sleep(3 * media.ScreenFrameDuration)
+	if got.sent() != 0 {
+		t.Fatalf("%d frames were sent with nothing being shared", got.sent())
+	}
+
+	if err := video.Screen(true); err != nil {
+		t.Fatalf("Screen(true): %v", err)
+	}
+	if !video.ScreenOn() {
+		t.Fatal("the screen is not being shared after sharing started")
+	}
+	waitStream(t, &got, 3, media.ScreenFrameDuration)
+
+	if err := video.Screen(false); err != nil {
+		t.Fatalf("Screen(false): %v", err)
+	}
+	if video.ScreenOn() {
+		t.Fatal("the screen is still being shared after sharing stopped")
+	}
+	quiet := got.sent()
+	time.Sleep(5 * media.ScreenFrameDuration)
+	if got.sent() != quiet {
+		t.Fatalf("a screen nobody is sharing sent %d more frames", got.sent()-quiet)
+	}
+
+	// And shared again, since one Call is allowed more than one share.
+	if err := video.Screen(true); err != nil {
+		t.Fatalf("Screen(true) again: %v", err)
+	}
+	waitStream(t, &got, quiet+2, media.ScreenFrameDuration)
+}
+
+// TestScreenRoundTrip proves what one side shares is what the other side sees,
+// at the size and in the colour it was captured at — and that it arrives on the
+// screen stream rather than being mistaken for a camera.
+func TestScreenRoundTrip(t *testing.T) {
+	tint := color.RGBA{R: 30, G: 90, B: 200, A: 0xFF}
+	var sender, receiver seen
+	out, err := media.StartVideo(screenOnly(&media.Fake{ScreenTint: tint}, &sender))
+	if err != nil {
+		t.Fatalf("StartVideo: %v", err)
+	}
+	defer out.Close()
+	in, err := media.StartVideo(screenOnly(&media.Fake{}, &receiver))
+	if err != nil {
+		t.Fatalf("StartVideo: %v", err)
+	}
+	defer in.Close()
+
+	if err := out.Screen(true); err != nil {
+		t.Fatalf("Screen(true): %v", err)
+	}
+	waitStream(t, &sender, 4, media.ScreenFrameDuration)
+	for _, frame := range sender.encoded() {
+		in.PlayScreen(frame)
+	}
+
+	shown := receiver.pictures()
+	if len(shown) == 0 {
+		t.Fatal("nothing was decoded from a screen that sent frames")
+	}
+	first := shown[0]
+	if first.Bounds().Dx() != media.FakeScreenWidth || first.Bounds().Dy() != media.FakeScreenHeight {
+		t.Fatalf("decoded a %v picture, want %dx%d",
+			first.Bounds(), media.FakeScreenWidth, media.FakeScreenHeight)
+	}
+	if share := media.Tinted(first, tint); share < 0.7 {
+		t.Fatalf("only %.0f%% of the picture is the tint that was shared", share*100)
+	}
+}
+
+// TestCameraAndScreenAreIndependent proves the two streams do not interfere:
+// both run at once, each is decoded against its own reference frames, and
+// turning one off leaves the other running.
+func TestCameraAndScreenAreIndependent(t *testing.T) {
+	camTint := color.RGBA{R: 200, G: 40, B: 40, A: 0xFF}
+	screenTint := color.RGBA{R: 30, G: 90, B: 200, A: 0xFF}
+	var sentCam, sentScreen, gotCam, gotScreen seen
+	devices := &media.Fake{Tint: camTint, ScreenTint: screenTint}
+	out, err := media.StartVideo(media.VideoOptions{
+		Devices: devices,
+		Camera:  media.StreamOptions{Send: sentCam.take, Frame: gotCam.show},
+		Screen:  media.StreamOptions{Send: sentScreen.take, Frame: gotScreen.show},
+	})
+	if err != nil {
+		t.Fatalf("StartVideo: %v", err)
+	}
+	defer out.Close()
+	in, err := media.StartVideo(media.VideoOptions{
+		Devices: &media.Fake{},
+		Camera:  media.StreamOptions{Send: sentCam.take, Frame: gotCam.show},
+		Screen:  media.StreamOptions{Send: sentScreen.take, Frame: gotScreen.show},
+	})
+	if err != nil {
+		t.Fatalf("StartVideo: %v", err)
+	}
+	defer in.Close()
+
+	if err := out.Camera(true); err != nil {
+		t.Fatalf("Camera(true): %v", err)
+	}
+	if err := out.Screen(true); err != nil {
+		t.Fatalf("Screen(true): %v", err)
+	}
+	waitStream(t, &sentCam, 3, media.VideoFrameDuration)
+	waitStream(t, &sentScreen, 3, media.ScreenFrameDuration)
+
+	for _, frame := range sentCam.encoded() {
+		in.PlayCamera(frame)
+	}
+	for _, frame := range sentScreen.encoded() {
+		in.PlayScreen(frame)
+	}
+
+	cam := gotCam.pictures()
+	screen := gotScreen.pictures()
+	if len(cam) == 0 || len(screen) == 0 {
+		t.Fatalf("decoded %d camera and %d screen pictures; wanted both", len(cam), len(screen))
+	}
+	if share := media.Tinted(cam[0], camTint); share < 0.7 {
+		t.Errorf("only %.0f%% of the camera picture is the camera's tint", share*100)
+	}
+	if share := media.Tinted(screen[0], screenTint); share < 0.7 {
+		t.Errorf("only %.0f%% of the screen picture is the screen's tint", share*100)
+	}
+
+	// Stopping the share leaves the camera running.
+	if err := out.Screen(false); err != nil {
+		t.Fatalf("Screen(false): %v", err)
+	}
+	if !out.CameraOn() {
+		t.Fatal("stopping the share turned the camera off")
+	}
+	before := sentCam.sent()
+	waitStream(t, &sentCam, before+2, media.VideoFrameDuration)
+}
+
+// TestScreenWithoutADisplay proves a machine with nothing to share says so
+// rather than pretending to share a black rectangle.
+func TestScreenWithoutADisplay(t *testing.T) {
+	var got seen
+	video, err := media.StartVideo(screenOnly(blindDevices{}, &got))
+	if err != nil {
+		t.Fatalf("StartVideo: %v", err)
+	}
+	defer video.Close()
+	if err := video.Screen(true); err == nil {
+		t.Fatal("a machine with no display shared one")
+	} else if !errors.Is(err, media.ErrNoScreen) {
+		t.Fatalf("sharing failed with %v, which nothing can recognise", err)
+	}
+	if video.ScreenOn() {
+		t.Fatal("a screen that would not open reads as shared")
+	}
+}
+
+// TestVideoNeedsBothStreams proves a pipeline is refused rather than built
+// half-wired: a Call has two video streams whether or not anyone uses them.
+func TestVideoNeedsBothStreams(t *testing.T) {
+	var got seen
+	opts := cameraOnly(&media.Fake{}, &got)
+	opts.Screen = media.StreamOptions{}
+	if _, err := media.StartVideo(opts); err == nil {
+		t.Fatal("a pipeline with nowhere to put the screen was built anyway")
 	}
 }

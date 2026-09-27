@@ -37,6 +37,9 @@ const (
 	unmute
 	// camera: the camera, which only a Call has. arg is "on" or "off".
 	camera
+	// share, stopShare: the screen, which only a Call has.
+	share
+	stopShare
 	// unknown: a slash command that is not one. arg is what was typed.
 	unknown
 )
@@ -87,6 +90,8 @@ var commands = map[string]kind{
 	"mute":         mute,
 	"unmute":       unmute,
 	"camera":       camera,
+	"share":        share,
+	"stopshare":    stopShare,
 }
 
 // answers maps the bare words that resolve a standing Security Code prompt.

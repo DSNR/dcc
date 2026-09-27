@@ -361,13 +361,13 @@ func (s *Session) onAudio(gen int, payload []byte) {
 }
 
 // announceMediaLocked tells the other side which of this side's streams are
-// live. Screen is always off until the work that shares one lands, and saying
-// so explicitly is what the protocol asks for.
+// live — all three, every time, so that one frame says the whole truth and a
+// missed one cannot leave them believing something that is no longer so.
 func (s *Session) announceMediaLocked() {
 	if s.callState != Active || s.trans == nil {
 		return
 	}
-	_ = s.trans.Send(wire.Media{Mic: !s.muted, Cam: s.cam})
+	_ = s.trans.Send(wire.Media{Mic: !s.muted, Cam: s.cam, Screen: s.screen})
 }
 
 // ringLocked starts the ring timeout, which both sides run.
@@ -406,7 +406,7 @@ func (s *Session) setCallLocked(state CallState, reason CallReason) {
 }
 
 // endCallLocked returns the Session to text: the ring stops, the devices —
-// microphone, speaker and camera — are released, and the Call's id is
+// microphone, speaker, camera and screen — are released, and the Call's id is
 // forgotten so a straggling frame for it is discarded. Closing the audio
 // waits for its capture goroutine, which takes the Session's lock, so it
 // happens off this one.
@@ -419,12 +419,13 @@ func (s *Session) endCallLocked(reason CallReason) {
 	s.audio, s.video = nil, nil
 	s.muted, s.noMic = false, false
 	s.cam, s.noCam = false, false
+	s.screen, s.noScreen = false, false
 	s.remoteMedia, s.haveRemoteMedia = MediaChanged{}, false
 	if audio != nil {
 		go func() { _ = audio.Close() }()
 	}
-	// Closing the video releases the camera and waits for its capture
-	// goroutine, which is why it too happens off this lock.
+	// Closing the video releases the camera and the screen and waits for their
+	// capture goroutines, which is why it too happens off this lock.
 	if video != nil {
 		go func() { _ = video.Close() }()
 	}

@@ -43,9 +43,16 @@ type Session interface {
 	Camera(on bool) error
 	// CameraOn reports whether this side's camera is being sent.
 	CameraOn() bool
-	// Frames is the other side's decoded video, newest frame only — what the
-	// video window paints.
+	// Share starts or stops sharing this side's entire screen. Like Camera it
+	// opens or releases a device, so it never runs on the UI's goroutine.
+	Share(on bool) error
+	// Sharing reports whether this side's screen is being shared.
+	Sharing() bool
+	// Frames is the other side's decoded camera video, newest frame only —
+	// what the video window paints.
 	Frames() <-chan *image.RGBA
+	// ScreenFrames is the other side's shared screen, on its own channel.
+	ScreenFrames() <-chan *image.RGBA
 	// Close ends the Session and releases everything it holds.
 	Close() error
 }

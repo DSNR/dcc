@@ -14,8 +14,7 @@ const welcome = "dcc — end-to-end encrypted chat, peer to peer. Type /help to 
 // aren't obvious.
 const hint = " enter sends · alt+enter new line · pgup/pgdn scroll back · /help · ctrl+c quit"
 
-// helpLines is what /help says. The commands are the ones docs/mvp.md names;
-// the ones that need a screen to share arrive with the work that shares one.
+// helpLines is what /help says. The commands are the ones docs/mvp.md names.
 var helpLines = []string{
 	"Commands:",
 	"  /invite               open a Rendezvous and print an Invite to hand over",
@@ -25,6 +24,7 @@ var helpLines = []string{
 	"  /answer  /reject      pick up or turn down a Call ringing here",
 	"  /mute    /unmute      stop or resume sending your microphone",
 	"  /camera on|off        turn your camera on or off during a Call",
+	"  /share   /stopshare   start or stop sharing your whole screen",
 	"  /hangup               end the Call, stay connected for text",
 	"  /history [name]       read a stored Conversation, no connection needed",
 	"  /clearhistory <name>  delete a Conversation from this device only",
@@ -59,7 +59,7 @@ func callNotice(e session.CallChanged, peer string) string {
 	case session.Negotiating:
 		return "Setting the Call up…"
 	case session.Active:
-		return "In a Call — video is in its own window. /camera on to be seen, /mute to stop sending your microphone, /hangup to end it."
+		return "In a Call — video is in its own window. /camera on to be seen, /share to show your screen, /mute to stop sending your microphone, /hangup to end it."
 	}
 	// Ringing is announced by the command that caused it.
 	return ""
@@ -82,6 +82,16 @@ func camNotice(live bool, peer string) string {
 		return words.Quoted(peer) + " turned their camera on."
 	}
 	return words.Quoted(peer) + " turned their camera off."
+}
+
+// shareNotice is the other side starting or stopping a share, for the same
+// reason again: the video window quietly changing what it is showing is not
+// something anyone should have to work out for themselves.
+func shareNotice(live bool, peer string) string {
+	if live {
+		return words.Quoted(peer) + " is sharing their screen — it is in the video window."
+	}
+	return words.Quoted(peer) + " stopped sharing their screen."
 }
 
 // promptRecord is what a Security Code prompt leaves in the conversation: the
@@ -143,11 +153,17 @@ func (m Model) callStatus() string {
 		if m.sess != nil && m.sess.CameraOn() {
 			status += " · camera on"
 		}
+		if m.sess != nil && m.sess.Sharing() {
+			status += " · sharing your screen"
+		}
 		if !m.remoteMic {
 			status += " · they are muted"
 		}
 		if m.remoteCam {
 			status += " · their camera is on"
+		}
+		if m.remoteScreen {
+			status += " · sharing their screen"
 		}
 		return status
 	}

@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// The shape of dcc's video. One stream at a conservative size and frame rate:
-// enough to see a face on, cheap enough that a pure-Go encoder keeps up on
-// one core's worth of work, and small enough to survive the relay.
+// The shape of dcc's camera video. One stream at a conservative size and frame
+// rate: enough to see a face on, cheap enough that a pure-Go encoder keeps up
+// on one core's worth of work, and small enough to survive the relay. A shared
+// screen is a different shape entirely — see screen.go.
 const (
 	// VideoWidth and VideoHeight are what the fake camera produces and what
 	// a driver aims for. A real camera that will only do something else is
@@ -19,11 +20,11 @@ const (
 	// VP8 carries the frame size to the other side itself.
 	VideoWidth  = 640
 	VideoHeight = 480
-	// VideoFPS is the frame rate the pipeline paces capture at.
+	// VideoFPS is the frame rate the pipeline paces camera capture at.
 	VideoFPS = 15
-	// VideoFrameDuration is how much time one frame stands for.
+	// VideoFrameDuration is how much time one camera frame stands for.
 	VideoFrameDuration = time.Second / VideoFPS
-	// VideoBitrateKbps is the encoder's CBR target.
+	// VideoBitrateKbps is the camera encoder's CBR target.
 	VideoBitrateKbps = 600
 )
 
@@ -59,14 +60,22 @@ type Camera interface {
 // lands there. A Call still carries the other side's video.
 var ErrNoCamera = errors.New("media: no camera on this platform")
 
-// VideoOptions configures one Call's video.
+// VideoOptions configures one Call's video: the camera and the shared screen,
+// which are two streams of the same shape and are configured the same way.
 type VideoOptions struct {
-	// Devices opens the camera. Nil means the real one.
+	// Devices opens the camera and the screen. Nil means the real ones.
 	Devices Devices
+	// Camera and Screen configure the two streams. Both are required — a
+	// Call always has both, even when nobody ever turns either on.
+	Camera, Screen StreamOptions
+}
+
+// StreamOptions configures one of a Call's video streams, in both directions.
+type StreamOptions struct {
 	// Send takes one encoded frame, on the capture goroutine, once every
-	// VideoFrameDuration the camera is on for. Required.
+	// frame interval the stream is on for. Required.
 	Send func(frame []byte, d time.Duration)
-	// Frame takes one decoded frame of the other side's video, on the
+	// Frame takes one decoded frame of the other side's stream, on the
 	// goroutine that delivered it. The image is the caller's to keep.
 	// Required.
 	Frame func(img *image.RGBA)
@@ -74,69 +83,43 @@ type VideoOptions struct {
 	// arriving here can be decoded without one. Nil means never asking,
 	// which leaves a stream that lost its reference frames black.
 	NeedKeyframe func()
-	// Stopped reports the camera stopping on its own — unplugged, or a driver
-	// that gave up — as opposed to being turned off. Whoever is telling the
-	// other side what this side is sending needs to know: a camera that has
-	// gone is off, and saying otherwise leaves them watching a frozen frame.
+	// Stopped reports the device stopping on its own — a camera unplugged, a
+	// display that went away — as opposed to being turned off. Whoever is
+	// telling the other side what this side is sending needs to know: a
+	// camera that has gone is off, and saying otherwise leaves them watching
+	// a frozen frame.
 	Stopped func()
 }
 
-// Video is one Call's video: the camera on the way out, the other side's
-// frames on the way in. It is created when a Call goes Active with the camera
-// off — a Call that never turns one on never opens the device — and closed
-// when the Call ends.
+// Video is one Call's video: this side's camera and shared screen on the way
+// out, the other side's on the way in. It is created when a Call goes Active
+// with both off — a Call that never turns either on never opens a device — and
+// closed when the Call ends.
+//
+// The two streams are independent in every way that matters: each opens its
+// own device, runs at its own frame rate, keeps its own encoder and decoder,
+// and asks for and answers keyframes on its own. Neither ever waits behind the
+// other.
 type Video struct {
-	send    func([]byte, time.Duration)
-	frame   func(*image.RGBA)
-	need    func()
-	stopped func()
-
-	// devices is the boundary the camera is opened through.
-	devices Devices
-
-	mu sync.Mutex
-	// closed and gone say the same thing, under different guards: the state
-	// machine reads closed under mu, and Play reads gone without it, because
-	// the receiving side must never wait behind a camera being turned off.
-	closed bool
-	gone   atomic.Bool
-	// cam and enc are the running capture session, both nil when the camera
-	// is off. done closes when the capture goroutine has stopped, so
-	// Camera(false) and Close can promise no Send outlives them.
-	cam  Camera
-	enc  *encoder
-	done chan struct{}
-
-	// The receiving side has its own lock: decoding a frame takes
-	// milliseconds, and the camera must not wait behind it.
-	decMu sync.Mutex
-	dec   *decoder
-	asked time.Time
-
-	// force asks the encoder for a keyframe on its next frame — the answer
-	// to the other side's PLI. It is atomic rather than held under v.mu
-	// because the capture goroutine must never wait on that lock: turning
-	// the camera off holds it while waiting for the goroutine to finish.
-	force atomic.Bool
+	camera *stream
+	screen *stream
 }
 
-// StartVideo builds a Call's video pipeline. It touches no device: a camera
-// is opened by Camera(true) and closed the moment it is turned off, so the
-// light beside it means what it says.
+// StartVideo builds a Call's video pipeline. It touches no device: they are
+// opened by Camera(true) and Screen(true) and closed the moment either is
+// turned off, so the light beside a camera means what it says.
 func StartVideo(opts VideoOptions) (*Video, error) {
-	if opts.Send == nil || opts.Frame == nil {
-		return nil, errors.New("media: video needs somewhere to send and show frames")
+	if opts.Camera.Send == nil || opts.Camera.Frame == nil ||
+		opts.Screen.Send == nil || opts.Screen.Frame == nil {
+		return nil, errors.New("media: video needs somewhere to send and show both streams")
 	}
 	devices := opts.Devices
 	if devices == nil {
 		devices = System()
 	}
 	return &Video{
-		send:    opts.Send,
-		frame:   opts.Frame,
-		need:    opts.NeedKeyframe,
-		stopped: opts.Stopped,
-		devices: devices,
+		camera: newStream("camera", devices.Camera, VideoFPS, VideoBitrateKbps, opts.Camera),
+		screen: newStream("screen", devices.Screen, ScreenFPS, ScreenBitrateKbps, opts.Screen),
 	}, nil
 }
 
@@ -144,197 +127,291 @@ func StartVideo(opts VideoOptions) (*Video, error) {
 // and starts sending; turning it off releases the device entirely, which is
 // the only camera-off a participant has any reason to trust. Asking for the
 // state it is already in does nothing.
-func (v *Video) Camera(on bool) error {
-	v.mu.Lock()
-	if v.closed {
-		v.mu.Unlock()
+func (v *Video) Camera(on bool) error { return v.camera.set(on) }
+
+// CameraOn reports whether this side's camera is open and being sent. A camera
+// that died under the pipeline reads as off shortly afterwards: it releases
+// itself the way turning it off would.
+func (v *Video) CameraOn() bool { return v.camera.isOn() }
+
+// PlayCamera decodes one received camera frame and hands the picture over.
+func (v *Video) PlayCamera(frame []byte) { v.camera.play(frame) }
+
+// ForceCameraKeyframe answers the other side asking for one on the camera
+// stream: the next frame this side encodes is a keyframe, whatever the encoder
+// had planned. It is the one thing that gets a receiver who joined late, or
+// lost packets, a picture again.
+func (v *Video) ForceCameraKeyframe() { v.camera.force.Store(true) }
+
+// Screen starts or stops sharing this side's screen, on the same terms as the
+// camera: starting opens the display, stopping releases it.
+func (v *Video) Screen(on bool) error { return v.screen.set(on) }
+
+// ScreenOn reports whether this side's screen is being shared.
+func (v *Video) ScreenOn() bool { return v.screen.isOn() }
+
+// PlayScreen decodes one received frame of the other side's shared screen.
+func (v *Video) PlayScreen(frame []byte) { v.screen.play(frame) }
+
+// ForceScreenKeyframe is ForceCameraKeyframe for the screen stream.
+func (v *Video) ForceScreenKeyframe() { v.screen.force.Store(true) }
+
+// Close turns both streams off and releases their decoders. It waits for their
+// capture goroutines, so no Send callback runs after it returns. Closing twice
+// is fine.
+func (v *Video) Close() error {
+	// Both, whatever the first one says: a screen left capturing because the
+	// camera objected would outlive the Call.
+	return errors.Join(v.camera.close(), v.screen.close())
+}
+
+// stream is one video stream, both ways: one device encoded and sent, and the
+// other side's equivalent decoded and shown. The camera and the screen are the
+// same machinery pointed at different devices, running at different rates and
+// called different things when something goes wrong.
+type stream struct {
+	// name is what this stream is called in an error a participant reads.
+	name string
+	// open is the device boundary this stream's source is opened through.
+	open func() (Camera, error)
+	// fps and bitrate are the encoder's operating point, and fps also paces
+	// what the wire is told each frame is worth.
+	fps     int
+	bitrate int
+
+	send    func([]byte, time.Duration)
+	frame   func(*image.RGBA)
+	need    func()
+	stopped func()
+
+	mu sync.Mutex
+	// closed and gone say the same thing, under different guards: the state
+	// machine reads closed under mu, and play reads gone without it, because
+	// the receiving side must never wait behind a device being turned off.
+	closed bool
+	gone   atomic.Bool
+	// dev and enc are the running capture session, both nil when the stream
+	// is off. done closes when the capture goroutine has stopped, so set(false)
+	// and close can promise no Send outlives them.
+	dev  Camera
+	enc  *encoder
+	done chan struct{}
+
+	// The receiving side has its own lock: decoding a frame takes
+	// milliseconds, and the device must not wait behind it.
+	decMu sync.Mutex
+	dec   *decoder
+	asked time.Time
+
+	// force asks the encoder for a keyframe on its next frame — the answer
+	// to the other side's PLI. It is atomic rather than held under mu
+	// because the capture goroutine must never wait on that lock: turning
+	// the stream off holds it while waiting for the goroutine to finish.
+	force atomic.Bool
+}
+
+// newStream builds one stream, off, with no device open.
+func newStream(name string, open func() (Camera, error), fps, bitrate int, opts StreamOptions) *stream {
+	return &stream{
+		name:    name,
+		open:    open,
+		fps:     fps,
+		bitrate: bitrate,
+		send:    opts.Send,
+		frame:   opts.Frame,
+		need:    opts.NeedKeyframe,
+		stopped: opts.Stopped,
+	}
+}
+
+// frameDuration is how much time one of this stream's frames stands for.
+func (s *stream) frameDuration() time.Duration {
+	return time.Second / time.Duration(s.fps)
+}
+
+// set turns the stream on or off, opening or releasing its device. Asking for
+// the state it is already in does nothing.
+func (s *stream) set(on bool) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
 		return errors.New("media: the Call's video is closed")
 	}
-	if on == (v.cam != nil) {
-		v.mu.Unlock()
+	if on == (s.dev != nil) {
+		s.mu.Unlock()
 		return nil
 	}
 	if !on {
-		v.stopCameraLocked()
-		v.mu.Unlock()
+		s.stopLocked()
+		s.mu.Unlock()
 		return nil
 	}
-	devices := v.devices
-	v.mu.Unlock()
+	open := s.open
+	s.mu.Unlock()
 
 	// Opening the device happens off the lock: a camera takes a moment to
 	// come alive, and the received stream must keep flowing meanwhile.
-	cam, err := devices.Camera()
+	dev, err := open()
 	if err != nil {
-		return fmt.Errorf("media: opening the camera: %w", err)
+		return fmt.Errorf("media: opening the %s: %w", s.name, err)
 	}
-	first, err := cam.Read()
+	first, err := dev.Read()
 	if err != nil {
-		_ = cam.Close()
-		return fmt.Errorf("media: reading from the camera: %w", err)
+		_ = dev.Close()
+		return fmt.Errorf("media: reading from the %s: %w", s.name, err)
 	}
-	enc, err := newEncoder(first.Width, first.Height)
+	enc, err := newEncoder(first.Width, first.Height, s.fps, s.bitrate)
 	if err != nil {
-		_ = cam.Close()
+		_ = dev.Close()
 		return err
 	}
 
-	v.mu.Lock()
-	if v.closed || v.cam != nil {
+	s.mu.Lock()
+	if s.closed || s.dev != nil {
 		// Closed, or turned on twice at once, while the device was opening.
-		closed := v.closed
-		v.mu.Unlock()
-		_ = cam.Close()
+		closed := s.closed
+		s.mu.Unlock()
+		_ = dev.Close()
 		_ = enc.close()
 		if closed {
 			return errors.New("media: the Call's video is closed")
 		}
 		return nil
 	}
-	v.cam, v.enc = cam, enc
-	v.done = make(chan struct{})
-	// A keyframe asked for while there was no camera to answer with is not
+	s.dev, s.enc = dev, enc
+	s.done = make(chan struct{})
+	// A keyframe asked for while there was no device to answer with is not
 	// owed on this one's first frame: every stream starts with a keyframe.
-	v.force.Store(false)
-	go v.capture(cam, enc, first, v.done)
-	v.mu.Unlock()
+	s.force.Store(false)
+	go s.capture(dev, enc, first, s.done)
+	s.mu.Unlock()
 	return nil
 }
 
-// On reports whether this side's camera is open and being sent. A camera that
-// died under the pipeline reads as off shortly afterwards: it releases itself
-// the way turning it off would.
-func (v *Video) On() bool {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return v.cam != nil
+// isOn reports whether the stream's device is open and being sent.
+func (s *stream) isOn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dev != nil
 }
 
-// ForceKeyframe answers the other side asking for one: the next frame this
-// side encodes is a keyframe, whatever the encoder had planned. It is the one
-// thing that gets a receiver who joined late, or lost packets, a picture
-// again.
-func (v *Video) ForceKeyframe() {
-	v.force.Store(true)
-}
-
-// Play decodes one received frame and hands the picture over. A frame that
+// play decodes one received frame and hands the picture over. A frame that
 // cannot be decoded — the stream's keyframe was lost, or never arrived — asks
 // the other side for a keyframe rather than dropping the stream.
-func (v *Video) Play(frame []byte) {
-	if len(frame) == 0 || v.gone.Load() {
+func (s *stream) play(frame []byte) {
+	if len(frame) == 0 || s.gone.Load() {
 		return
 	}
 
-	v.decMu.Lock()
-	if v.dec == nil {
+	s.decMu.Lock()
+	if s.dec == nil {
 		dec, err := newDecoder()
 		if err != nil {
-			v.decMu.Unlock()
+			s.decMu.Unlock()
 			return
 		}
-		v.dec = dec
+		s.dec = dec
 	}
-	img, err := v.dec.decode(frame)
-	ask := err != nil && time.Since(v.asked) > keyframeWait
+	img, err := s.dec.decode(frame)
+	ask := err != nil && time.Since(s.asked) > keyframeWait
 	if ask {
-		v.asked = time.Now()
+		s.asked = time.Now()
 	}
-	v.decMu.Unlock()
+	s.decMu.Unlock()
 
 	if img != nil {
-		v.frame(img)
+		s.frame(img)
 	}
-	if ask && v.need != nil {
-		v.need()
+	if ask && s.need != nil {
+		s.need()
 	}
 }
 
-// Close turns the camera off and releases the decoder. It waits for the
-// capture goroutine, so no Send callback runs after it returns. Closing twice
-// is fine.
-func (v *Video) Close() error {
-	v.gone.Store(true)
-	v.mu.Lock()
-	if v.closed {
-		v.mu.Unlock()
+// close turns the stream off and releases its decoder. It waits for the
+// capture goroutine, so no Send callback runs after it returns.
+func (s *stream) close() error {
+	s.gone.Store(true)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
-	v.closed = true
-	v.stopCameraLocked()
-	v.mu.Unlock()
+	s.closed = true
+	s.stopLocked()
+	s.mu.Unlock()
 
-	v.decMu.Lock()
-	defer v.decMu.Unlock()
-	if v.dec != nil {
-		_ = v.dec.close()
-		v.dec = nil
+	s.decMu.Lock()
+	defer s.decMu.Unlock()
+	if s.dec != nil {
+		_ = s.dec.close()
+		s.dec = nil
 	}
 	return nil
 }
 
-// cameraStopped tidies up after a camera that stopped by itself: the device is
-// released like any other camera-off, and whoever announces this side's
-// streams is told. A camera that was turned off deliberately has already been
+// deviceStopped tidies up after a device that stopped by itself: it is
+// released like any other stream-off, and whoever announces this side's
+// streams is told. A device that was turned off deliberately has already been
 // cleared by then, so this finds nothing to do.
-func (v *Video) cameraStopped() {
-	v.mu.Lock()
-	if v.cam == nil {
-		v.mu.Unlock()
+func (s *stream) deviceStopped() {
+	s.mu.Lock()
+	if s.dev == nil {
+		s.mu.Unlock()
 		return
 	}
-	v.stopCameraLocked()
-	v.mu.Unlock()
-	if v.stopped != nil {
-		v.stopped()
+	s.stopLocked()
+	s.mu.Unlock()
+	if s.stopped != nil {
+		s.stopped()
 	}
 }
 
-// stopCameraLocked releases the device and waits for the capture goroutine to
-// notice. Closing the Camera is what unblocks a Read that is waiting for the
+// stopLocked releases the device and waits for the capture goroutine to
+// notice. Closing the device is what unblocks a Read that is waiting for the
 // next frame, so a camera that has stopped delivering cannot hold a Call's
-// video hostage. The capture goroutine takes v.mu only between frames, so
+// video hostage. The capture goroutine takes s.mu only between frames, so
 // waiting for it under the lock is safe.
-func (v *Video) stopCameraLocked() {
-	if v.cam == nil {
+func (s *stream) stopLocked() {
+	if s.dev == nil {
 		return
 	}
-	_ = v.cam.Close()
-	<-v.done
-	v.cam, v.enc = nil, nil
-	v.done = nil
+	_ = s.dev.Close()
+	<-s.done
+	s.dev, s.enc = nil, nil
+	s.done = nil
 }
 
-// capture is the sending side's clock: the camera delivers a frame, the
-// encoder turns it into a VP8 frame, and it goes out. The camera and the
+// capture is the sending side's clock: the device delivers a frame, the
+// encoder turns it into a VP8 frame, and it goes out. The device and the
 // encoder belong to this goroutine for its lifetime, which is why they are
-// passed in rather than read back off the Video.
-func (v *Video) capture(cam Camera, enc *encoder, first Picture, done chan<- struct{}) {
+// passed in rather than read back off the stream.
+func (s *stream) capture(dev Camera, enc *encoder, first Picture, done chan<- struct{}) {
 	defer func() {
 		_ = enc.close()
-		// Whatever ended the loop, the camera is no longer being sent. If it
-		// was turned off, this finds nothing left to do; if the device died
-		// under us, it releases it and says so. Off this goroutine, because
-		// the lock it needs is the one a Camera(false) holds while waiting
-		// for this goroutine to finish.
-		go v.cameraStopped()
+		// Whatever ended the loop, the device is no longer being sent. If it
+		// was turned off, this finds nothing left to do; if it died under us,
+		// it releases it and says so. Off this goroutine, because the lock it
+		// needs is the one a set(false) holds while waiting for this
+		// goroutine to finish.
+		go s.deviceStopped()
 		close(done)
 	}()
 	// The frame that sized the encoder is the first one sent — the device is
 	// already running, and throwing it away would show a black frame.
+	duration := s.frameDuration()
 	pic, err := first, error(nil)
 	for {
-		frame, encodeErr := enc.encode(pic, v.force.Swap(false))
+		frame, encodeErr := enc.encode(pic, s.force.Swap(false))
 		if encodeErr != nil {
-			// The encoder has given up on this Call's camera. The Call
-			// carries on without it, as it does without a microphone.
+			// The encoder has given up on this stream. The Call carries on
+			// without it, as it does without a microphone.
 			return
 		}
 		if len(frame) > 0 {
-			v.send(frame, VideoFrameDuration)
+			s.send(frame, duration)
 		}
-		if pic, err = cam.Read(); err != nil {
-			// The camera is gone. Ending the Call over it would be worse.
+		if pic, err = dev.Read(); err != nil {
+			// The device is gone. Ending the Call over it would be worse.
 			return
 		}
 	}

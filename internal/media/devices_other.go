@@ -18,3 +18,6 @@ func (noDevices) Playback() (Sink, error) { return nil, ErrNoDevices }
 
 // Camera implements Devices.
 func (noDevices) Camera() (Camera, error) { return nil, ErrNoCamera }
+
+// Screen implements Devices.
+func (noDevices) Screen() (Screen, error) { return nil, ErrNoScreen }

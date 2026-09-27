@@ -62,6 +62,11 @@ func (wasapiDevices) Playback() (Sink, error) {
 // writes a frame to it and says cam:false. Windows receives video normally.
 func (wasapiDevices) Camera() (Camera, error) { return nil, ErrNoCamera }
 
+// Screen implements Devices. Unlike the camera it is not deferred: GDI needs
+// no cgo, so the Windows build shares a screen exactly as Linux does — which
+// is what makes a Windows Call useful despite the camera.
+func (wasapiDevices) Screen() (Screen, error) { return openScreen() }
+
 // openStream starts one endpoint's goroutine and waits for it to report
 // whether the device opened. Capture and render differ only in which
 // endpoint they ask for and which way the audio then flows.

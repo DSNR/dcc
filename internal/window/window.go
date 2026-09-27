@@ -36,13 +36,19 @@ type Options struct {
 	// Frames is the video to show, newest frame only: the channel a Session
 	// hands out. Nil shows a black window.
 	Frames <-chan *image.RGBA
+	// Screen is the other side's shared screen, on the same terms. It takes
+	// the window over while Sharing is on, because what somebody is pointing
+	// at is what the other person needs to see; their face is the thing that
+	// can wait.
+	Screen <-chan *image.RGBA
 	// Failed reports a window that could not be opened or that died — no
 	// display, no GPU, a compositor that went away. Nil says nothing.
 	Failed func(error)
 }
 
-// Window is one open video window. It paints whatever arrives on Frames and
-// stops when it is closed, from here or by the person clicking the close box.
+// Window is one open video window. It paints whatever arrives on Frames — or
+// on Screen, while a share is running — and stops when it is closed, from here
+// or by the person clicking the close box.
 //
 // It shows the other side's video, full window. The local picture-in-picture
 // ADR 0003 describes is the GUI's, and arrives with it.
@@ -54,8 +60,12 @@ type Window struct {
 	done chan struct{}
 	once sync.Once
 
-	mu    sync.Mutex
-	shown *image.RGBA
+	mu sync.Mutex
+	// camera and screen are the newest frame of each stream; sharing picks
+	// which of them the window is for.
+	camera  *image.RGBA
+	screen  *image.RGBA
+	sharing bool
 }
 
 // Open puts a window on the screen and starts painting. It returns
@@ -72,9 +82,24 @@ func Open(opts Options) *Window {
 		app.Title(opts.Title),
 		app.Size(unit.Dp(startWidth), unit.Dp(startHeight)),
 	)
-	go w.feed(opts.Frames)
+	go w.feed(opts.Frames, false)
+	go w.feed(opts.Screen, true)
 	go w.paint(opts.Failed)
 	return w
+}
+
+// Sharing says whether the other side is sharing their screen, which is what
+// decides whether this window is showing their screen or their camera. It
+// returns at once and may be called before either stream has delivered
+// anything.
+func (w *Window) Sharing(on bool) {
+	w.mu.Lock()
+	changed := w.sharing != on
+	w.sharing = on
+	w.mu.Unlock()
+	if changed {
+		w.win.Invalidate()
+	}
 }
 
 // Close takes the window down. It returns at once — the window closes on its
@@ -88,15 +113,20 @@ func (w *Window) Close() {
 // by the participant.
 func (w *Window) Closed() <-chan struct{} { return w.done }
 
-// feed keeps the newest frame and asks for a repaint. Only the newest is
-// kept: a window that fell behind should show the current picture, not catch
-// up through stale ones.
-func (w *Window) feed(frames <-chan *image.RGBA) {
+// feed keeps the newest frame of one stream and asks for a repaint. Only the
+// newest is kept: a window that fell behind should show the current picture,
+// not catch up through stale ones. One of these runs per stream, so neither
+// ever waits behind the other.
+func (w *Window) feed(frames <-chan *image.RGBA, screen bool) {
 	for {
 		select {
 		case img := <-frames:
 			w.mu.Lock()
-			w.shown = img
+			if screen {
+				w.screen = img
+			} else {
+				w.camera = img
+			}
 			w.mu.Unlock()
 			w.win.Invalidate()
 		case <-w.stop:
@@ -131,7 +161,10 @@ func (w *Window) paint(failed func(error)) {
 			// window is letterboxed rather than showing whatever was there.
 			paint.Fill(gtx.Ops, color.NRGBA{A: 0xFF})
 			w.mu.Lock()
-			img := w.shown
+			img := w.camera
+			if w.sharing && w.screen != nil {
+				img = w.screen
+			}
 			w.mu.Unlock()
 			if img != nil {
 				widget.Image{

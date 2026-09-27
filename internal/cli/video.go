@@ -18,6 +18,9 @@ type VideoOptions struct {
 	Title string
 	// Frames is the video to paint, newest frame only.
 	Frames <-chan *image.RGBA
+	// Screen is the other side's shared screen, on the same terms, which
+	// takes the window over while they are sharing.
+	Screen <-chan *image.RGBA
 	// Failed reports a window that could not be opened or that died.
 	Failed func(error)
 }
@@ -25,6 +28,9 @@ type VideoOptions struct {
 // VideoWindow is one open video window, as the terminal interface sees it: it
 // can be closed, and it says when it has been.
 type VideoWindow interface {
+	// Sharing says whether the other side is sharing their screen, which is
+	// what decides whether the window shows their screen or their camera.
+	Sharing(on bool)
 	// Close takes the window down. It returns at once, and closing twice — or
 	// closing one the participant has already closed — is fine.
 	Close()

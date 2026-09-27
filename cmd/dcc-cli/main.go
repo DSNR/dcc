@@ -56,6 +56,7 @@ func run() error {
 			return window.Open(window.Options{
 				Title:  opts.Title,
 				Frames: opts.Frames,
+				Screen: opts.Screen,
 				Failed: opts.Failed,
 			})
 		},

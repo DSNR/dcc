@@ -25,12 +25,20 @@ var (
 	peerTint = color.RGBA{R: 40, G: 40, B: 200, A: 0xFF}
 )
 
+// And the two the fake screens paint, which are nothing like either camera's:
+// a picture of a shared screen must be tellable from a picture of a face, on
+// top of being tellable from the other side's.
+var (
+	hostScreenTint = color.RGBA{R: 200, G: 190, B: 40, A: 0xFF}
+	peerScreenTint = color.RGBA{R: 40, G: 190, B: 190, A: 0xFF}
+)
+
 // callPair brings up a Connected pair whose Calls run on fake devices, and
 // returns both Sessions with the fakes their audio lands in.
 func callPair(t *testing.T, ring time.Duration) (host, peer *session.Session, hostFake, peerFake *media.Fake) {
 	t.Helper()
-	hostFake = &media.Fake{Tone: hostTone, Tint: hostTint}
-	peerFake = &media.Fake{Tone: peerTone, Tint: peerTint}
+	hostFake = &media.Fake{Tone: hostTone, Tint: hostTint, ScreenTint: hostScreenTint}
+	peerFake = &media.Fake{Tone: peerTone, Tint: peerTint, ScreenTint: peerScreenTint}
 	host = newCallSession(t, "Alice", hostFake, ring)
 	peer = newCallSession(t, "Bob", peerFake, ring)
 
@@ -97,6 +105,21 @@ func waitCam(t *testing.T, s *session.Session, want bool) {
 			t.Fatalf("events closed before the other side's camera was %v", want)
 		}
 		if mc, isMedia := e.(session.MediaChanged); isMedia && mc.Cam == want {
+			return
+		}
+	}
+}
+
+// waitShare drains events until the other side announces its screen share in
+// the wanted state.
+func waitShare(t *testing.T, s *session.Session, want bool) {
+	t.Helper()
+	for {
+		e, ok := nextEvent(t, s)
+		if !ok {
+			t.Fatalf("events closed before the other side's share was %v", want)
+		}
+		if mc, isMedia := e.(session.MediaChanged); isMedia && mc.Screen == want {
 			return
 		}
 	}
@@ -297,13 +320,14 @@ func TestSecondCall(t *testing.T) {
 	}
 }
 
-// deafDevices has no sound card and no camera at all, the way a headless
+// deafDevices has no sound card, no camera and no display at all, the way a headless
 // machine does not.
 type deafDevices struct{}
 
 func (deafDevices) Capture() (media.Source, error) { return nil, media.ErrNoDevices }
 func (deafDevices) Playback() (media.Sink, error)  { return nil, media.ErrNoDevices }
 func (deafDevices) Camera() (media.Camera, error)  { return nil, media.ErrNoCamera }
+func (deafDevices) Screen() (media.Screen, error)  { return nil, media.ErrNoScreen }
 
 // TestCallWithoutDevices checks a machine with no microphone still holds a
 // Call — it simply cannot speak, and is refused the pretence of unmuting.
@@ -446,6 +470,153 @@ func drainFrames(s *session.Session, wait time.Duration) {
 	for {
 		select {
 		case <-s.Frames():
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// TestCallCarriesAScreenShare is the screen's whole path: shared inside an
+// Active Call it shows up on the other side — as a media state they can see and
+// as pictures they can paint — it arrives alongside the camera rather than in
+// place of it, and stopping the share stops both the sending and the saying so.
+func TestCallCarriesAScreenShare(t *testing.T) {
+	host, peer, _, _ := callPair(t, 0)
+
+	if _, err := host.Call(); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	waitCall(t, peer, session.Incoming)
+	if err := peer.Answer(); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	waitCall(t, host, session.Active)
+	waitCall(t, peer, session.Active)
+
+	// A Call starts with nobody sharing anything.
+	if host.Sharing() {
+		t.Error("the host is sharing a screen before anyone asked it to")
+	}
+	if img := screenFrame(peer, 500*time.Millisecond); img != nil {
+		t.Error("the peer is seeing a screen nobody shared")
+	}
+
+	// The camera goes on first, so that the share has something to arrive
+	// beside: the two streams must not be mistaken for each other.
+	if err := host.Camera(true); err != nil {
+		t.Fatalf("Camera(true): %v", err)
+	}
+	waitCam(t, peer, true)
+
+	if err := host.Share(true); err != nil {
+		t.Fatalf("Share(true): %v", err)
+	}
+	if !host.Sharing() {
+		t.Error("the host is not sharing after starting a share")
+	}
+	waitShare(t, peer, true)
+
+	shared := screenFrame(peer, 20*time.Second)
+	if shared == nil {
+		t.Fatal("the peer never saw the host's screen")
+	}
+	if share := media.Tinted(shared, hostScreenTint); share < 0.7 {
+		t.Errorf("only %.0f%% of the picture is the host's screen tint", share*100)
+	}
+	if share := media.Tinted(shared, hostTint); share > 0.1 {
+		t.Errorf("%.0f%% of the shared screen is the host's camera", share*100)
+	}
+
+	// And the camera is still arriving on its own channel, unbothered.
+	seen := frame(peer, 20*time.Second)
+	if seen == nil {
+		t.Fatal("the host's camera stopped arriving once a screen was shared")
+	}
+	if share := media.Tinted(seen, hostTint); share < 0.7 {
+		t.Errorf("only %.0f%% of the camera picture is the host's camera tint", share*100)
+	}
+
+	if err := host.Share(false); err != nil {
+		t.Fatalf("Share(false): %v", err)
+	}
+	if host.Sharing() {
+		t.Error("the host is still sharing after stopping")
+	}
+	waitShare(t, peer, false)
+
+	// Whatever was already in flight arrives; after that, nothing.
+	drainScreenFrames(peer, time.Second)
+	if img := screenFrame(peer, time.Second); img != nil {
+		t.Error("the peer is still seeing a screen that stopped being shared")
+	}
+	// The camera survived the share ending.
+	if !host.CameraOn() {
+		t.Error("stopping the share turned the host's camera off")
+	}
+
+	// Hanging up leaves the Session up for text, and there is nothing left to
+	// share into.
+	if err := host.Hangup(); err != nil {
+		t.Fatalf("Hangup: %v", err)
+	}
+	waitCall(t, host, session.NoCall)
+	waitCall(t, peer, session.NoCall)
+	if err := host.Share(true); err == nil {
+		t.Fatal("a screen was shared with no Call to share it into")
+	}
+}
+
+// TestShareWithoutADisplay checks a machine with nothing to share says so and
+// keeps saying so, rather than announcing a share the other side would sit
+// waiting on.
+func TestShareWithoutADisplay(t *testing.T) {
+	host := newCallSession(t, "Alice", deafDevices{}, 0)
+	peer := newCallSession(t, "Bob", &media.Fake{}, 0)
+	if err := host.Host(t.Context()); err != nil {
+		t.Fatalf("Host: %v", err)
+	}
+	waitState(t, host, session.Hosting)
+	connectSessions(t, host, peer, waitInvite(t, host))
+
+	if _, err := host.Call(); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	waitCall(t, peer, session.Incoming)
+	if err := peer.Answer(); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	waitCall(t, host, session.Active)
+
+	if err := host.Share(true); err == nil {
+		t.Fatal("a machine with no display shared one")
+	}
+	if host.Sharing() {
+		t.Error("a share that would not start reads as sharing")
+	}
+	// And again, now that the Session knows there is nothing here.
+	if err := host.Share(true); err == nil {
+		t.Fatal("a machine with no display shared one on the second ask")
+	}
+}
+
+// screenFrame waits up to wait for one decoded picture of the other side's
+// shared screen, or reports none arriving.
+func screenFrame(s *session.Session, wait time.Duration) *image.RGBA {
+	select {
+	case img := <-s.ScreenFrames():
+		return img
+	case <-time.After(wait):
+		return nil
+	}
+}
+
+// drainScreenFrames throws away whatever arrives for a while, so that an
+// assertion about nothing arriving afterwards means something.
+func drainScreenFrames(s *session.Session, wait time.Duration) {
+	deadline := time.After(wait)
+	for {
+		select {
+		case <-s.ScreenFrames():
 		case <-deadline:
 			return
 		}

@@ -18,6 +18,19 @@ const ToneFrequency = 440.0
 // lose it.
 var TestPatternTint = color.RGBA{R: 40, G: 180, B: 60, A: 0xFF}
 
+// ScreenPatternTint is the colour a Fake screen paints when it is not told
+// otherwise — a mid orange, nothing like TestPatternTint, so that "this is
+// their screen and not their camera" is a thing a test can tell apart.
+var ScreenPatternTint = color.RGBA{R: 200, G: 120, B: 30, A: 0xFF}
+
+// The size a Fake screen is. Deliberately not the camera's: a picture that
+// came out of the screen stream can be told from one that came out of the
+// camera by its shape alone, tint or no tint.
+const (
+	FakeScreenWidth  = 480
+	FakeScreenHeight = 320
+)
+
 // Fake is the media-device boundary made of software: a tone generator where
 // the microphone would be, a recorder where the speaker would be, and a test
 // pattern where the camera would be. It is what lets a Call be driven end to
@@ -31,9 +44,12 @@ type Fake struct {
 	// Tint is the colour the fake camera's test pattern is painted in. Zero
 	// means TestPatternTint. It is the video half of the same trick: two
 	// sides with different tints make "I am seeing them" assertable.
-	Tint  color.RGBA
-	mu    sync.Mutex
-	heard *Recorder
+	Tint color.RGBA
+	// ScreenTint is the same for the fake screen. Zero means
+	// ScreenPatternTint, which no camera would be mistaken for.
+	ScreenTint color.RGBA
+	mu         sync.Mutex
+	heard      *Recorder
 }
 
 // Heard is everything written to the fake speaker — the same Recorder every
@@ -69,19 +85,37 @@ func (f *Fake) Camera() (Camera, error) {
 	return &pattern{
 		tint: tint,
 		pic:  NewPicture(VideoWidth, VideoHeight),
+		pace: VideoFrameDuration,
 		done: make(chan struct{}),
 		next: time.Now(),
 	}, nil
 }
 
-// pattern is a fake camera: a flat tint with a bar sweeping across it,
-// delivered in real time one frame every VideoFrameDuration. The tint is what
-// a test recognises the sender by; the bar is what makes every frame differ
-// from the last, so the encoder produces inter frames rather than an endless
-// run of identical ones.
+// Screen opens the fake screen, which is the same test pattern in another
+// colour, another shape and at the rate a real screen is captured at.
+func (f *Fake) Screen() (Screen, error) {
+	tint := f.ScreenTint
+	if tint == (color.RGBA{}) {
+		tint = ScreenPatternTint
+	}
+	return &pattern{
+		tint: tint,
+		pic:  NewPicture(FakeScreenWidth, FakeScreenHeight),
+		pace: ScreenFrameDuration,
+		done: make(chan struct{}),
+		next: time.Now(),
+	}, nil
+}
+
+// pattern is a fake camera or a fake screen: a flat tint with a bar sweeping
+// across it, delivered in real time one frame every pace. The tint is what a
+// test recognises the sender by; the bar is what makes every frame differ from
+// the last, so the encoder produces inter frames rather than an endless run of
+// identical ones.
 type pattern struct {
 	tint  color.RGBA
 	pic   Picture
+	pace  time.Duration
 	frame int
 	next  time.Time
 	done  chan struct{}
@@ -90,7 +124,7 @@ type pattern struct {
 
 // Read paints the next frame, sleeping until it is due.
 func (p *pattern) Read() (Picture, error) {
-	p.next = p.next.Add(VideoFrameDuration)
+	p.next = p.next.Add(p.pace)
 	select {
 	case <-time.After(time.Until(p.next)):
 	case <-p.done:

@@ -52,6 +52,9 @@ type Devices interface {
 	// camera on, never before: a Call that stays audio-only never touches
 	// the device.
 	Camera() (Camera, error)
+	// Screen opens the screen for sharing, and like Camera is called only
+	// when someone asks for it.
+	Screen() (Screen, error)
 }
 
 // ErrNoDevices reports that this build has no driver for the platform it is

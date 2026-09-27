@@ -24,13 +24,15 @@ const (
 const (
 	videoThreads = 4
 	videoCPUUsed = -6
-	// videoKeyframeInterval caps how long a receiver that missed the last
-	// keyframe waits for the next one even if it never asks.
-	videoKeyframeInterval = 10 * VideoFPS
+	// keyframeSeconds caps how long a receiver that missed the last keyframe
+	// waits for the next one even if it never asks. It is in seconds because
+	// the camera and the screen run at different frame rates.
+	keyframeSeconds = 10
 )
 
-// encoder turns Pictures into VP8 frames. It is built around one camera's
-// frame size and belongs to the capture goroutine that drives it.
+// encoder turns Pictures into VP8 frames. It is built around one stream's
+// frame size, frame rate and bitrate, and belongs to the capture goroutine
+// that drives it.
 type encoder struct {
 	enc *govpx.VP8Encoder
 	// buf is the output buffer every frame is encoded into, reused across
@@ -42,18 +44,19 @@ type encoder struct {
 	frames uint64
 }
 
-// newEncoder builds the encoder for a camera of the given size.
-func newEncoder(width, height int) (*encoder, error) {
+// newEncoder builds the encoder for one stream's frame size, frame rate and
+// bitrate — a camera's, or a shared screen's.
+func newEncoder(width, height, fps, bitrateKbps int) (*encoder, error) {
 	enc, err := govpx.NewVP8Encoder(govpx.EncoderOptions{
 		Width:             width,
 		Height:            height,
-		FPS:               VideoFPS,
+		FPS:               fps,
 		Threads:           videoThreads,
 		Deadline:          govpx.DeadlineRealtime,
 		CpuUsed:           videoCPUUsed,
 		RateControlMode:   govpx.RateControlCBR,
-		TargetBitrateKbps: VideoBitrateKbps,
-		KeyFrameInterval:  videoKeyframeInterval,
+		TargetBitrateKbps: bitrateKbps,
+		KeyFrameInterval:  keyframeSeconds * fps,
 		// A frame that references one that was lost shows as smeared
 		// rubbish until the next keyframe; error resilience is what keeps a
 		// lossy path watchable between them.

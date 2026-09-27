@@ -91,16 +91,19 @@ func (t *Transport) StartMedia() error {
 			return fmt.Errorf("transport: adding the %s track: %w", track.ID(), err)
 		}
 		// Somebody has to read each sender's RTCP, or pion's receive buffer
-		// backs up. On the camera it also matters what is in it: a PLI is the
-		// other side saying it cannot decode what we are sending, and the only
-		// answer is a keyframe. The screen's is read and discarded until the
-		// work that shares one arrives to answer it.
-		go t.readSenderRTCP(sender, track.ID() == trackCamera)
+		// backs up. It also matters what is in it: a PLI is the other side
+		// saying it cannot decode what we are sending on that stream, and the
+		// only answer is a keyframe on that same stream.
+		wanted := func(o Options) func() { return o.KeyframeWanted }
+		if track.ID() == trackScreen {
+			wanted = func(o Options) func() { return o.ScreenKeyframeWanted }
+		}
+		go t.readSenderRTCP(sender, wanted)
 	}
 
 	t.mu.Lock()
 	t.audio = audio
-	t.camera, t.screen = camera, screen
+	t.camera.track, t.screen.track = camera, screen
 	t.mu.Unlock()
 
 	if !initiator {
@@ -141,23 +144,53 @@ func videoTrack(id string) (*webrtc.TrackLocalStaticRTP, error) {
 	return track, nil
 }
 
+// videoStream is one of the Call's two video streams as the transport sees it:
+// the local track frames are written to, the RTP state that belongs to the
+// stream rather than to any one frame, and the SSRC of the other side's
+// equivalent, which is what a PLI has to name. Every field is held under the
+// Transport's lock.
+type videoStream struct {
+	track *webrtc.TrackLocalStaticRTP
+	// sequence and timestamp are what every packet of this stream carries;
+	// pictureID is what each of its frames is stamped with.
+	sequence  uint16
+	timestamp uint32
+	pictureID uint16
+	// remote is the other side's SSRC for this stream, zero until their first
+	// packet on it arrives.
+	remote webrtc.SSRC
+}
+
 // WriteVideo sends one encoded frame of camera video: packetized into RTP
 // payloads at videoMTU, each with a 15-bit PictureID, the last one carrying
 // the marker bit that says the frame is complete. Like WriteAudio it is an
 // error before StartMedia and after the Call's transport has gone.
 func (t *Transport) WriteVideo(frame []byte, d time.Duration) error {
+	return t.writeVideo(&t.camera, "video", frame, d)
+}
+
+// WriteScreen sends one encoded frame of this side's shared screen, the same
+// way, on the stream that is only ever the screen — which is how the other
+// side knows a picture of a desktop from a picture of a face.
+func (t *Transport) WriteScreen(frame []byte, d time.Duration) error {
+	return t.writeVideo(&t.screen, "a shared screen", frame, d)
+}
+
+// writeVideo packetizes and sends one frame on one of the video streams. what
+// names the stream in the error a caller reads.
+func (t *Transport) writeVideo(stream *videoStream, what string, frame []byte, d time.Duration) error {
 	t.mu.Lock()
-	camera := t.camera
-	if camera == nil {
+	track := stream.track
+	if track == nil {
 		t.mu.Unlock()
-		return errors.New("transport: there is no Call to send video to")
+		return fmt.Errorf("transport: there is no Call to send %s to", what)
 	}
 	// The descriptor's PictureID and the RTP timestamp belong to the stream,
 	// not the frame, so they are minted here under the lock that owns them.
-	picture := t.pictureID
-	t.pictureID = govpx.NextVP8RTPPictureID(t.pictureID)
-	timestamp := t.videoTime
-	t.videoTime += uint32(d.Seconds() * media.VideoClockRate)
+	picture := stream.pictureID
+	stream.pictureID = govpx.NextVP8RTPPictureID(stream.pictureID)
+	timestamp := stream.timestamp
+	stream.timestamp += uint32(d.Seconds() * media.VideoClockRate)
 	t.mu.Unlock()
 
 	packets, err := govpx.PacketizeVP8RTPFrame(govpx.VP8RTPPayloadDescriptor{
@@ -166,14 +199,14 @@ func (t *Transport) WriteVideo(frame []byte, d time.Duration) error {
 		PictureID:        picture,
 	}, frame, videoMTU)
 	if err != nil {
-		return fmt.Errorf("transport: packetizing a video frame: %w", err)
+		return fmt.Errorf("transport: packetizing a frame of %s: %w", what, err)
 	}
 	for _, packet := range packets {
 		t.mu.Lock()
-		sequence := t.videoSeq
-		t.videoSeq++
+		sequence := stream.sequence
+		stream.sequence++
 		t.mu.Unlock()
-		if err := camera.WriteRTP(&rtp.Packet{
+		if err := track.WriteRTP(&rtp.Packet{
 			Header: rtp.Header{
 				Version:        2,
 				Marker:         packet.Marker,
@@ -182,18 +215,24 @@ func (t *Transport) WriteVideo(frame []byte, d time.Duration) error {
 			},
 			Payload: packet.Payload,
 		}); err != nil {
-			return fmt.Errorf("transport: sending video: %w", err)
+			return fmt.Errorf("transport: sending %s: %w", what, err)
 		}
 	}
 	return nil
 }
 
-// RequestKeyframe asks the other side for a keyframe, which is the only way
-// back from a video stream whose reference frames were lost. It is a PLI on
-// the camera stream; a Call with no video in it yet has nothing to ask.
-func (t *Transport) RequestKeyframe() {
+// RequestKeyframe asks the other side for a keyframe on the camera stream,
+// which is the only way back from a stream whose reference frames were lost. A
+// Call with no video in it yet has nothing to ask.
+func (t *Transport) RequestKeyframe() { t.requestKeyframe(&t.camera) }
+
+// RequestScreenKeyframe is RequestKeyframe for the shared screen.
+func (t *Transport) RequestScreenKeyframe() { t.requestKeyframe(&t.screen) }
+
+// requestKeyframe sends a PLI naming one stream's remote SSRC.
+func (t *Transport) requestKeyframe(stream *videoStream) {
 	t.mu.Lock()
-	ssrc, ended := t.remoteVideo, t.ended
+	ssrc, ended := stream.remote, t.ended
 	t.mu.Unlock()
 	if ended || ssrc == 0 {
 		return
@@ -203,18 +242,16 @@ func (t *Transport) RequestKeyframe() {
 	_ = t.pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(ssrc)}})
 }
 
-// readSenderRTCP drains one sender's RTCP. When the sender is the camera it
-// also answers the part that needs answering: a PLI or a FIR is the other side
-// asking for a keyframe.
-func (t *Transport) readSenderRTCP(sender *webrtc.RTPSender, keyframes bool) {
+// readSenderRTCP drains one sender's RTCP and answers the part that needs
+// answering: a PLI or a FIR is the other side asking for a keyframe on that
+// sender's stream. wanted picks the callback that belongs to it, read fresh
+// each time because the Options may have been replaced by then.
+func (t *Transport) readSenderRTCP(sender *webrtc.RTPSender, wanted func(Options) func()) {
 	buf := make([]byte, 1500)
 	for {
 		n, _, err := sender.Read(buf)
 		if err != nil {
 			return
-		}
-		if !keyframes {
-			continue
 		}
 		packets, err := rtcp.Unmarshal(buf[:n])
 		if err != nil {
@@ -224,10 +261,10 @@ func (t *Transport) readSenderRTCP(sender *webrtc.RTPSender, keyframes bool) {
 			switch packet.(type) {
 			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
 				t.mu.Lock()
-				wanted, ended := t.opts.KeyframeWanted, t.ended
+				ask, ended := wanted(t.opts), t.ended
 				t.mu.Unlock()
-				if !ended && wanted != nil {
-					wanted()
+				if !ended && ask != nil {
+					ask()
 				}
 			}
 		}
@@ -255,28 +292,30 @@ func (t *Transport) mediaNegotiated() {
 }
 
 // onTrack is a remote track arriving — pion reports it when the first RTP
-// packet for it does. The microphone and the camera are read; the screen is
-// drained until the work that shows it lands, so pion's receiver does not
-// back up.
+// packet for it does. Each of the three is read by whoever wants it; anything
+// else is drained, so a peer that sends a stream this build knows nothing about
+// does not back pion's receiver up.
 func (t *Transport) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 	switch {
 	case track.Kind() == webrtc.RTPCodecTypeAudio:
 		go t.readAudio(track)
 	case track.ID() == trackCamera:
-		go t.readVideo(track)
+		go t.readVideo(track, &t.camera, func(o Options) func([]byte) { return o.Video })
+	case track.ID() == trackScreen:
+		go t.readVideo(track, &t.screen, func(o Options) func([]byte) { return o.Screen })
 	default:
 		go drain(track)
 	}
 }
 
-// readVideo reassembles the other side's camera stream: RTP payloads collect
-// until the marker bit says the frame is complete, and the frame goes to the
-// Call. A gap in the sequence numbers means a fragment is missing, so the
-// frame it belonged to is dropped whole — half a VP8 frame is not a picture,
-// and the decoder asks for a keyframe when it notices what it lost.
-func (t *Transport) readVideo(track *webrtc.TrackRemote) {
+// readVideo reassembles one of the other side's video streams: RTP payloads
+// collect until the marker bit says the frame is complete, and the frame goes
+// to the Call. A gap in the sequence numbers means a fragment is missing, so
+// the frame it belonged to is dropped whole — half a VP8 frame is not a
+// picture, and the decoder asks for a keyframe when it notices what it lost.
+func (t *Transport) readVideo(track *webrtc.TrackRemote, stream *videoStream, deliver func(Options) func([]byte)) {
 	t.mu.Lock()
-	t.remoteVideo = track.SSRC()
+	stream.remote = track.SSRC()
 	t.mu.Unlock()
 
 	var (
@@ -310,14 +349,14 @@ func (t *Transport) readVideo(track *webrtc.TrackRemote) {
 			continue
 		}
 		t.mu.Lock()
-		video := t.opts.Video
+		show := deliver(t.opts)
 		ended := t.ended
 		t.mu.Unlock()
 		if ended {
 			return
 		}
-		if video != nil {
-			video(assembled)
+		if show != nil {
+			show(assembled)
 		}
 	}
 }

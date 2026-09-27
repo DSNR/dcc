@@ -73,17 +73,21 @@ type fakeSession struct {
 	muted   bool
 	cameras []bool
 	cam     bool
+	shares  []bool
+	sharing bool
 	frames  chan *image.RGBA
+	screens chan *image.RGBA
 
-	// hostErr, joinErr, sendErr, callErr and cameraErr are what the next
-	// matching command returns; zero means it succeeds.
-	hostErr, joinErr, sendErr, callErr, cameraErr error
+	// hostErr, joinErr, sendErr, callErr, cameraErr and shareErr are what the
+	// next matching command returns; zero means it succeeds.
+	hostErr, joinErr, sendErr, callErr, cameraErr, shareErr error
 }
 
 func newFake() *fakeSession {
 	return &fakeSession{
-		events: make(chan session.Event, 64),
-		frames: make(chan *image.RGBA, 1),
+		events:  make(chan session.Event, 64),
+		frames:  make(chan *image.RGBA, 1),
+		screens: make(chan *image.RGBA, 1),
 	}
 }
 
@@ -189,7 +193,33 @@ func (f *fakeSession) CameraOn() bool {
 	return f.cam
 }
 
+func (f *fakeSession) Share(on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.shareErr != nil {
+		return f.shareErr
+	}
+	f.shares = append(f.shares, on)
+	f.sharing = on
+	return nil
+}
+
+func (f *fakeSession) Sharing() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sharing
+}
+
 func (f *fakeSession) Frames() <-chan *image.RGBA { return f.frames }
+
+func (f *fakeSession) ScreenFrames() <-chan *image.RGBA { return f.screens }
+
+// shareCalls is what the TUI asked of the screen share.
+func (f *fakeSession) shareCalls() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.shares...)
+}
 
 // cameraCalls is what the TUI asked of the camera.
 func (f *fakeSession) cameraCalls() []bool {
@@ -247,7 +277,10 @@ type fakeWindow struct {
 	mu     sync.Mutex
 	opened []cli.VideoOptions
 	closes int
-	done   chan struct{}
+	// showing records every Sharing the window was told, so a test can check
+	// what it was pointed at and when.
+	showing []bool
+	done    chan struct{}
 }
 
 func newWindows() *fakeWindow {
@@ -260,6 +293,29 @@ func (w *fakeWindow) open(opts cli.VideoOptions) cli.VideoWindow {
 	defer w.mu.Unlock()
 	w.opened = append(w.opened, opts)
 	return w
+}
+
+func (w *fakeWindow) Sharing(on bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.showing = append(w.showing, on)
+}
+
+// shown is what the window was told about the other side's share, in order.
+func (w *fakeWindow) shown() []bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]bool(nil), w.showing...)
+}
+
+// screen is the shared-screen channel the window was opened over.
+func (w *fakeWindow) screen() <-chan *image.RGBA {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.opened) == 0 {
+		return nil
+	}
+	return w.opened[len(w.opened)-1].Screen
 }
 
 func (w *fakeWindow) Close() {
