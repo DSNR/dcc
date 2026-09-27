@@ -33,7 +33,9 @@ func openScreen() (Screen, error) {
 	}
 	bounds := screenshot.GetDisplayBounds(primaryDisplay)
 	width, height := screenSize(bounds.Dx(), bounds.Dy())
-	if width < 2 || height < 2 {
+	// A display too small to make one macroblock of comes back as nothing at
+	// all from screenSize, and there is no encoding that.
+	if width < videoMacroblock || height < videoMacroblock {
 		return nil, fmt.Errorf("media: the display is %v: %w", bounds, ErrNoScreen)
 	}
 	// One capture before the boundary is crossed, so that a display which

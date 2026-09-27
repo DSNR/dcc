@@ -28,6 +28,14 @@ const (
 	// waits for the next one even if it never asks. It is in seconds because
 	// the camera and the screen run at different frame rates.
 	keyframeSeconds = 10
+	// videoMacroblock is VP8's macroblock size, and the granularity every
+	// frame handed to govpx is sized in. A frame that is not a whole number
+	// of macroblocks in both directions — 1920x1080 is 67.5 of them tall —
+	// has a bottom row and a right column of part-macroblocks, and govpx
+	// reads those as if they were whole: sixteen rows into a source plane
+	// that has eight rows left, which is an index out of range that takes
+	// the process down with it. ADR 0005 has the details.
+	videoMacroblock = 16
 )
 
 // encoder turns Pictures into VP8 frames. It is built around one stream's
@@ -35,6 +43,10 @@ const (
 // that drives it.
 type encoder struct {
 	enc *govpx.VP8Encoder
+	// width and height are the size actually encoded: the device's frame
+	// size brought down to whole macroblocks. Every frame is handed over
+	// cropped to them, whatever size the device delivered.
+	width, height int
 	// buf is the output buffer every frame is encoded into, reused across
 	// frames — fifteen frames a second is no place to be allocating. The
 	// frame handed out aliases it until the next encode.
@@ -42,14 +54,27 @@ type encoder struct {
 	// frames counts encoded frames, which at a fixed frame rate is the
 	// presentation timestamp in the encoder's own timebase.
 	frames uint64
+	// abandoned says the encoder panicked and is not to be used again. It
+	// needs no lock: an encoder belongs to one capture goroutine.
+	abandoned bool
 }
 
 // newEncoder builds the encoder for one stream's frame size, frame rate and
 // bitrate — a camera's, or a shared screen's.
 func newEncoder(width, height, fps, bitrateKbps int) (*encoder, error) {
+	// Whole macroblocks only, whatever the device delivered — see
+	// videoMacroblock. A shared screen is already scaled to a whole number
+	// of them (screenSize); a camera that hands out something else has at
+	// most fifteen rows and columns cropped off it, which nobody on the
+	// other side can tell from the framing.
+	w := width & ^(videoMacroblock - 1)
+	h := height & ^(videoMacroblock - 1)
+	if w < videoMacroblock || h < videoMacroblock {
+		return nil, fmt.Errorf("media: a %dx%d frame is too small to encode", width, height)
+	}
 	enc, err := govpx.NewVP8Encoder(govpx.EncoderOptions{
-		Width:             width,
-		Height:            height,
+		Width:             w,
+		Height:            h,
 		FPS:               fps,
 		Threads:           videoThreads,
 		Deadline:          govpx.DeadlineRealtime,
@@ -67,19 +92,46 @@ func newEncoder(width, height, fps, bitrateKbps int) (*encoder, error) {
 	}
 	// One frame's worth of output at the target bitrate is a few kilobytes;
 	// a keyframe is far larger, and this is sized so neither has to grow it.
-	return &encoder{enc: enc, buf: make([]byte, width*height)}, nil
+	return &encoder{enc: enc, width: w, height: h, buf: make([]byte, w*h)}, nil
 }
 
 // encode turns one Picture into a VP8 frame, forcing a keyframe when the
 // other side has asked for one. The returned frame aliases the encoder's own
 // buffer and is empty when rate control dropped the frame.
-func (e *encoder) encode(pic Picture, force bool) ([]byte, error) {
+func (e *encoder) encode(pic Picture, force bool) (frame []byte, err error) {
+	if e.abandoned {
+		return nil, errors.New("media: the VP8 encoder was abandoned after it panicked")
+	}
+	// govpx is a young encoder and reads a little past the planes it is
+	// handed in places (ADR 0005). None of that is worth a dead process, so a
+	// panic becomes an error here, and the capture goroutine treats it the
+	// way it treats a device that died: the stream stops and the other side
+	// is told this side is no longer sending. The encoder is abandoned rather
+	// than retried, because the panic unwound it halfway through a frame and
+	// its reference buffers no longer describe anything a receiver could
+	// decode against — sharing again builds a fresh one, starting from a
+	// keyframe.
+	//
+	// Be honest about the limit: this only catches a panic raised on this
+	// goroutine. govpx's row workers have no recover of their own, so a panic
+	// on one of those is unreachable from here and still fatal. That is why
+	// the real fix is the macroblock-aligned frame size above, and this is
+	// only the net under it.
+	defer func() {
+		if r := recover(); r != nil {
+			e.abandoned = true
+			frame, err = nil, fmt.Errorf("media: the VP8 encoder panicked: %v", r)
+		}
+	}()
 	if force {
 		e.enc.ForceKeyFrame()
 	}
+	// The encoder's own size, not the picture's: a frame wider or taller
+	// than whole macroblocks is encoded as its top-left corner, using the
+	// device's strides to step down it.
 	result, err := e.enc.EncodeInto(e.buf, govpx.Image{
-		Width:   pic.Width,
-		Height:  pic.Height,
+		Width:   e.width,
+		Height:  e.height,
 		Y:       pic.Y,
 		U:       pic.U,
 		V:       pic.V,
