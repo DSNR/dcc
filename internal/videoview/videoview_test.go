@@ -56,6 +56,44 @@ func TestLaysOutEveryPicture(t *testing.T) {
 	}
 }
 
+// TestTheVideoAreaIsTheWholeSpaceItWasGiven checks the area claims all the
+// room on offer, whatever is or is not in it — which is the rectangle the black
+// behind a picture is clipped to. A Flex hands a child a zero minimum on the
+// cross axis, so an area that sized itself from its constraints' minimum used
+// to report no width at all, and the black it painted was bounded by nothing:
+// in dcc-gui, where the video is one part of the chat window, that blacked the
+// whole window out the moment a Call went Active.
+func TestTheVideoAreaIsTheWholeSpaceItWasGiven(t *testing.T) {
+	theirs, mine := frame(640, 480), frame(320, 240)
+	said := func(gtx layout.Context) layout.Dimensions {
+		return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X/2, 20)}
+	}
+	shows := []struct {
+		name         string
+		large, small *image.RGBA
+		empty        layout.Widget
+	}{
+		{name: "nothing"},
+		{name: "nothing, said out loud", empty: said},
+		{name: "their picture", large: theirs},
+		{name: "their picture and mine", large: theirs, small: mine},
+		{name: "mine alone", small: mine},
+	}
+	// The constraints a Flex gives a flexed child: the main axis pinned to the
+	// slot, the cross axis free from nothing up to the window.
+	area := image.Pt(400, 150)
+	for _, show := range shows {
+		t.Run(show.name, func(t *testing.T) {
+			gtx := newContext(area)
+			gtx.Constraints.Min = image.Pt(0, area.Y)
+			got := Layout(gtx, show.large, show.small, show.empty)
+			if got.Size != area {
+				t.Errorf("the video area is %v of the %v it was given", got.Size, area)
+			}
+		})
+	}
+}
+
 // TestThumbnailIsASmallCornerOfTheWindow checks the thumbnail keeps its
 // picture's shape, stays a corner of the window rather than most of it, and
 // never asks for more room than there is.
