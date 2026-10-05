@@ -171,6 +171,12 @@ func TestCallIsRungAnsweredAndHungUp(t *testing.T) {
 	}
 	waitMic(t, peer, false)
 
+	// The mic-state notification can outrun audio the host captured just
+	// before muting: those frames are still crossing the pipeline. Give
+	// them time to land before starting the "must not hear" window, or
+	// this test is racy.
+	time.Sleep(200 * time.Millisecond)
+
 	peerFake.Heard().Reset()
 	time.Sleep(500 * time.Millisecond)
 	if heard(peerFake, hostTone) {
