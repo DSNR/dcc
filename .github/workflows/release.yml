@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Gio build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libx11-xcb-dev libwayland-dev libegl1-mesa-dev libxcursor-dev
+
+      - name: Next tag
+        id: tag
+        run: |
+          latest=$(git tag -l 'v0.*.0' | sed 's/^v0\.//;s/\.0$//' | sort -n | tail -1)
+          next=$(( ${latest:-0} + 1 ))
+          echo "tag=v0.$next.0" >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries
+        env:
+          CGO_ENABLED_LINUX: 1
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -tags novulkan -o dist/dcc-cli-linux-amd64 ./cmd/dcc-cli
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -tags novulkan -o dist/dcc-gui-linux-amd64 ./cmd/dcc-gui
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o dist/dcc-cli-windows-amd64.exe ./cmd/dcc-cli
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o dist/dcc-gui-windows-amd64.exe ./cmd/dcc-gui
+
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=${{ steps.tag.outputs.tag }}
+          git tag "$tag"
+          git push origin "$tag"
+          gh release create "$tag" dist/dcc-cli-linux-amd64 dist/dcc-gui-linux-amd64 dist/dcc-cli-windows-amd64.exe dist/dcc-gui-windows-amd64.exe \
+            --title "$tag" \
+            --generate-notes
