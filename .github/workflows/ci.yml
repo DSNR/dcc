@@ -19,6 +19,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install Gio build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libx11-xcb-dev libwayland-dev libegl1-mesa-dev libxcursor-dev
+
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -29,12 +34,12 @@ jobs:
           fi
 
       - name: go vet
-        run: go vet ./...
+        run: go vet -tags novulkan ./...
 
       - name: go build
-        run: go build ./...
+        run: go build -tags novulkan ./...
 
       # Real cloudflared tunnels, real capture devices and browser interop are
       # verified by hand; CI runs the in-process seams only.
       - name: go test
-        run: go test -race ./...
+        run: go test -tags novulkan -race ./...
