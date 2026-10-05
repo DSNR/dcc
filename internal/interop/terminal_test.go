@@ -57,6 +57,72 @@ func TestWindowTalksToTerminal(t *testing.T) {
 	})
 }
 
+// TestTwoTerminalsTalk is dcc-cli on both ends: two terminals, each on its
+// own *session.Session, meeting over a loopback Rendezvous and exchanging
+// text through a real handshake and a real DataChannel. Nothing here is
+// GUI-specific, so this is the proof that two terminals alone — no window on
+// either end — hold a Conversation the same way the mixed pairing does.
+func TestTwoTerminalsTalk(t *testing.T) {
+	host := newTerminal(t, "Ada", nil)
+	peer := newTerminal(t, "Grace", nil)
+
+	host.submit("/invite")
+	host.waitFor(t, "the Host's Invite", func() bool { return strings.Contains(host.model.View(), "#") })
+	invite := inviteFrom(host.model.View())
+
+	peer.submit("/connect " + invite)
+	bothWaitFor(t, host, peer, "both Security Codes", func() bool {
+		return strings.Contains(host.model.View(), "Security Code") && strings.Contains(peer.model.View(), "Security Code")
+	})
+
+	host.submit("yes")
+	peer.submit("yes")
+	bothWaitFor(t, host, peer, "both sides Connected", func() bool {
+		return strings.Contains(host.model.View(), "Connected") && strings.Contains(peer.model.View(), "Connected")
+	})
+
+	host.submit("hello from the Host")
+	bothWaitFor(t, host, peer, "the Peer to see the Host's message", func() bool {
+		return strings.Contains(peer.model.View(), "hello from the Host")
+	})
+
+	peer.submit("and back from the Peer")
+	bothWaitFor(t, host, peer, "the Host to see the Peer's message", func() bool {
+		return strings.Contains(host.model.View(), "and back from the Peer")
+	})
+}
+
+// inviteFrom pulls the Invite URL out of a terminal's rendered screen.
+func inviteFrom(screen string) string {
+	for _, field := range strings.Fields(screen) {
+		if strings.Contains(field, "#") {
+			return field
+		}
+	}
+	return ""
+}
+
+// bothWaitFor pumps whichever of two terminals has a pending message until
+// want reports true — the shape two independently-driven Models need when
+// each must be kept moving while the other is what it is waiting on.
+func bothWaitFor(t *testing.T, a, b *terminal, what string, want func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(waitTimeout)
+	for {
+		if want() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s\n--- a ---\n%s\n--- b ---\n%s", what, a.model.View(), b.model.View())
+		}
+		pumped := a.pump()
+		pumped = b.pump() || pumped
+		if !pumped {
+			time.Sleep(tick)
+		}
+	}
+}
+
 // terminal is a dcc-cli Model driven the way bubbletea drives one: messages
 // applied one at a time, commands run off this goroutine and fed back in. It
 // is the smallest thing that can put a real terminal client on the other end
