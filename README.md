@@ -31,6 +31,22 @@ people. Cloudflare is used only to find each other, never to hold content.
 Both binaries — `dcc-cli` and `dcc-gui` — are thin consumers of
 `internal/session`, which is where every decision about a Session is made.
 
+## Installing
+
+Every merge to `master` tags a release and publishes copy-and-run binaries
+for Linux and Windows, both clients, at
+https://github.com/DSNR/dcc/releases/latest.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DSNR/dcc/master/scripts/install.sh | sh -s cli
+curl -fsSL https://raw.githubusercontent.com/DSNR/dcc/master/scripts/install.sh | sh -s gui
+```
+
+This downloads the right binary for your OS into `~/.local/bin` as
+`dcc-cli` or `dcc-gui`. Windows users can run the same script from Git Bash,
+or just download `dcc-cli-windows-amd64.exe` / `dcc-gui-windows-amd64.exe`
+from the releases page and run it directly — no install step needed.
+
 ## Using dcc-cli
 
 ```sh
@@ -97,6 +113,13 @@ go build -tags novulkan ./...
 go vet -tags novulkan ./...
 go test -tags novulkan ./...
 ```
+
+CI builds and tests every push and pull request against `master` and
+`staging`. A merge to `master` additionally cross-compiles both clients for
+Linux (native, with the Gio build dependencies above) and Windows (`GOOS=windows
+CGO_ENABLED=0`, since Windows needs no cgo — see ADR 0002), tags the next
+`v0.N.0`, and publishes the four binaries as a GitHub Release. See
+`.github/workflows/release.yml`.
 
 The video window is the one part that is not pure Go: Gio needs a windowing
 system, which on Linux means cgo and headers at build time — hence the tag,
